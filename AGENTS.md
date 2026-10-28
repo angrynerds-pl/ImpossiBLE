@@ -5,6 +5,7 @@
 - `Sources/ImpossiBLE` is the simulator-side Swift package library. It swizzles CoreBluetooth APIs at `+load` time and sends newline-delimited JSON to `/tmp/impossible.sock`. The socket is opened lazily on the first `CBCentralManager` instantiation (via a `dispatch_once` in `cbs_post_init`), so linking ImpossiBLE without using CoreBluetooth does not contact the provider. The connection layer (`CBSConnection`) auto-reconnects, sends a `hello {clientVersion, bundleId, pid}` handshake on connect (`kCBSLibraryVersion` — bump on release), and drives `CBManagerState` transitions (`poweredOn`/`poweredOff`) based on socket connectivity.
 - `Sources/ImpossiBLE-Mac` builds `ImpossiBLE-Mac.app`, the host-side menu bar provider and **single owner of the socket in both modes**. It has its own `Package.swift` with three targets: **`ImpossiBLEProviderKit`** (library product `ProviderKit/` — server, models, panel/editor views, the FontAwesome resource; this is what the Simsalabim suite app will embed), the thin **`ImpossiBLE-Mac`** executable (`App/` — app lifecycle plus the shell wiring in `StatusBarController`), and `ImpossiBLEPassthroughCore`, an ObjC library target containing `CBSPassthroughBridge` — the former `impossible-helper` daemon minus its socket server. The ProviderKit's public surface is deliberately small: `MockServer` (facade with `transport` and `passthroughActivity`), `MockStore`, the panel and editor entry views, and `FontAwesome`; everything else is internal. The transport (socket lifecycle, NDJSON framing, hello handshake, last-connection-wins takeover, client-socket hardening, socket-ownership guard) is SimBridgeKit's `ProtocolServer` (`MockServer.transport`, URL dependency on github.com/mickeyl/SimBridgeKit); `MockServer` is the domain layer on top and routes by `serveMode`: Mock answers from `MockStore`/client fixtures, Passthrough forwards every message to the bridge, which translates to real CoreBluetooth calls and emits replies through its `messageHandler`. All `MockServer` handlers run on the transport's I/O queue, which also guards its mutable state. There is no separate helper process anymore (removed in 3.0.0). Font resources (FontAwesome Brands) are bundled via SPM resource rules. The status item is implemented with AppKit (`StatusBarController`) rather than SwiftUI `MenuBarExtra` so the control panel can remain open while other apps are active.
 - Passthrough needs `NSBluetoothAlwaysUsageDescription` (in `Resources/Info.plist`) and — under the Hardened Runtime of release builds — `com.apple.security.device.bluetooth` in `Resources/entitlements.plist`. Missing entitlement is the classic "works in debug (ad-hoc, Hardened Runtime not enforced), denied in release" trap. Ad-hoc dev builds get a fresh identity each rebuild, so macOS re-prompts for Bluetooth consent.
+- `Sources/ImpossiBLE-Mac/MCPShim` is the `impossible-mcp` executable, the stdio MCP server agents launch; see **Agent Control (MCP)**.
 - `SampleApp` is an iOS sample Xcode project that imports the local package and uses normal CoreBluetooth APIs.
 - `Sources/ImpossiBLE/CBSMockConfiguration.m` is the only client-side file with a public API. Everything else activates itself; these three functions exist so a test can supply its own virtual peripherals.
 
@@ -57,6 +58,22 @@ Note that `MockServer.log()` only updates `lastActivity` for the UI; it does not
 - `cbs_try_local_l2cap` lives inside the file's `#if TARGET_OS_SIMULATOR` guard; it references simulator-only globals, so moving it out breaks device builds.
 
 The mock *server* still has no L2CAP support (`handleOpenL2CAP` returns "L2CAP is not supported in mock mode"), and that path remains for clients that register no handler.
+
+## Agent Control (MCP)
+
+Agents drive the provider through a tools-only MCP server. The MCP logic lives in the app (`ProviderKit/Control/`); the `impossible-mcp` executable target (`MCPShim/`) is a dumb stdio ⇄ socket pipe, so tools change without touching the shim.
+
+- `ProviderControlServer` (public facade, created in `MacAppRuntime`) owns `ControlSocketServer` on `/tmp/impossible-control.sock`, one `MCPSession` per connection, and one shared `ProviderTools`. Enabled by default; the footer `terminal` toggle persists `AgentControlEnabled`.
+- **Separate socket on purpose.** `/tmp/impossible.sock` is single-client with last-connection-wins; agents must never evict the simulator, and several may connect at once. Same ownership guard as `ProtocolServer` (probe, never steal); additionally 0600 plus a `getpeereid` uid check, since anyone on the socket can kill the simulator app (`terminate_simulator_app`) and drive the Mac's Bluetooth.
+- **Tool handlers run on main** (`MCPSession` hops there): store, mode controller, and activity monitor are main-thread objects. Never `main.sync` from the control queue.
+- **Wire shapes are `ControlDTO`, not the persisted `Codable` form**: hex/`valueText` values and named properties/pairing/security, because agents get base64 and bitmasks wrong.
+- **The client-supplied-configuration invariants hold here too**: tools only report it (`get_status`, the `note` on working-set results) and never route it into `MockStore`.
+- `set_mode` skips re-selecting the current mode, which would otherwise bounce the server and drop the connected app.
+- Agent capture uses its **own** `CaptureSession`, independent of the capture window and the serving bridge. Filter/selection logic is shared with the window through `CaptureFilter`.
+- `initialize` is answered but not required, so the shim can reconnect transparently after an app relaunch; requests in flight when the socket drops are answered by the shim with a JSON-RPC error.
+- The shim is bundled at `Contents/Helpers/impossible-mcp`, **not** `Contents/MacOS`: `mac-stop`/`mac-relaunch` `pkill -f ".app/Contents/MacOS"` and must not kill agents' shims. It is signed before the bundle (the bundle signature does not cover `Helpers` without `--deep`). With no app running it `open -g`s the enclosing `.app` (falling back to the bundle id) and waits up to 15 s.
+
+Smoke test without an agent: pipe newline-delimited JSON-RPC (`initialize`, `tools/list`, `tools/call`) into `ImpossiBLE-Mac.app/Contents/Helpers/impossible-mcp`.
 
 ## Forwarding vs Mocking
 
@@ -121,7 +138,9 @@ When cutting a new ImpossiBLE release:
   `brew audit --strict --online impossible` and `brew style
   Formula/impossible.rb`, then commit and push the tap update. Note: since
   3.0.0 there is no `impossible-helper` anymore — the formula must only build
-  and install the Mac app.
+  and install the Mac app. It should also link
+  `ImpossiBLE-Mac.app/Contents/Helpers/impossible-mcp` into `bin` so agents
+  can be pointed at a stable path.
 
 ## Generated Artifacts
 

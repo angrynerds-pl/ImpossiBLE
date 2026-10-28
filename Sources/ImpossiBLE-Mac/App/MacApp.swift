@@ -8,6 +8,7 @@ private final class MacAppRuntime {
     let store: MockStore
     let server: MockServer
     let modeController: ModeTransitionController<ProviderMode>
+    let control: ProviderControlServer
     let statusBar: StatusBarController
 
     init() {
@@ -34,23 +35,27 @@ private final class MacAppRuntime {
                     }
             }
         }
-        statusBar = StatusBarController(store: store, server: server, modeController: modeController)
+        control = ProviderControlServer(store: store, server: server, modeController: modeController)
+        statusBar = StatusBarController(store: store, server: server, modeController: modeController, control: control)
 
         server.store = store
+        control.start()
     }
 }
 
-/// Shuts the socket server down before the process exits so the socket file is
+/// Shuts the socket servers down before the process exits so the socket file is
 /// unlinked cleanly. Handles every quit path (footer button and ⌘Q).
 final class MacAppDelegate: NSObject, NSApplicationDelegate {
     @MainActor
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        guard let server = MacApp.retainedRuntime?.server else {
+        guard let runtime = MacApp.retainedRuntime else {
             return .terminateNow
         }
 
-        server.stop {
-            sender.reply(toApplicationShouldTerminate: true)
+        runtime.control.stop {
+            runtime.server.stop {
+                sender.reply(toApplicationShouldTerminate: true)
+            }
         }
         return .terminateLater
     }

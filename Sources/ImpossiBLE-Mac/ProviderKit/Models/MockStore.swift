@@ -62,26 +62,32 @@ public final class MockStore: ObservableObject {
 
     func duplicateDevice(id: UUID) {
         guard let device = devices.first(where: { $0.id == id }) else { return }
-        var copy = device
-        copy.id = UUID()
+        var copy = device.withFreshIdentifiers()
         copy.name = device.name + " Copy"
-        copy.services = copy.services.map { svc in
-            var s = svc
-            s.id = UUID()
-            s.characteristics = s.characteristics.map { ch in
-                var c = ch
-                c.id = UUID()
-                c.descriptors = c.descriptors.map { d in
-                    var desc = d
-                    desc.id = UUID()
-                    return desc
-                }
-                return c
-            }
-            return s
-        }
         devices.append(copy)
         save()
+    }
+
+    func addDevice(_ device: MockDevice) {
+        devices.append(device)
+        save()
+    }
+
+    /// Replaces the device with the same id. Returns false when it is gone.
+    @discardableResult
+    func updateDevice(_ device: MockDevice) -> Bool {
+        guard let idx = devices.firstIndex(where: { $0.id == device.id }) else { return false }
+        devices[idx] = device
+        save()
+        return true
+    }
+
+    @discardableResult
+    func setDeviceEnabled(id: UUID, _ isEnabled: Bool) -> Bool {
+        guard let idx = devices.firstIndex(where: { $0.id == id }) else { return false }
+        devices[idx].isEnabled = isEnabled
+        save()
+        return true
     }
 
     var enabledDevices: [MockDevice] {
@@ -110,8 +116,12 @@ public final class MockStore: ObservableObject {
     }
 
     func saveCurrentAsConfiguration(name: String) {
-        let config = MockConfiguration(name: name, devices: devices)
-        if let idx = configurations.firstIndex(where: { $0.name == name }) {
+        upsertConfiguration(MockConfiguration(name: name, devices: devices))
+    }
+
+    /// Stores `config`, replacing any user configuration with the same name.
+    func upsertConfiguration(_ config: MockConfiguration) {
+        if let idx = configurations.firstIndex(where: { $0.name == config.name }) {
             configurations[idx] = config
         } else {
             configurations.append(config)
@@ -121,12 +131,7 @@ public final class MockStore: ObservableObject {
 
     func saveConfiguration(name: String, devices newDevices: [MockDevice], loadImmediately: Bool) {
         let config = MockConfiguration(name: name, devices: newDevices)
-        if let idx = configurations.firstIndex(where: { $0.name == name }) {
-            configurations[idx] = config
-        } else {
-            configurations.append(config)
-        }
-        saveConfigurations()
+        upsertConfiguration(config)
 
         if loadImmediately {
             loadConfiguration(config)
@@ -137,26 +142,7 @@ public final class MockStore: ObservableObject {
 
     func loadConfiguration(_ config: MockConfiguration) {
         // Deep copy with fresh IDs so multiple loads don't share identifiers
-        devices = config.devices.map { device in
-            var d = device
-            d.id = UUID()
-            d.services = d.services.map { svc in
-                var s = svc
-                s.id = UUID()
-                s.characteristics = s.characteristics.map { ch in
-                    var c = ch
-                    c.id = UUID()
-                    c.descriptors = c.descriptors.map { desc in
-                        var dd = desc
-                        dd.id = UUID()
-                        return dd
-                    }
-                    return c
-                }
-                return s
-            }
-            return d
-        }
+        devices = config.devices.map { $0.withFreshIdentifiers() }
         activeConfigurationName = config.name
         save()
     }
@@ -166,7 +152,54 @@ public final class MockStore: ObservableObject {
         saveConfigurations()
     }
 
+    /// Renames a user configuration, following it with the active name when it
+    /// is the loaded one. Built-ins are not stored and cannot be renamed.
+    @discardableResult
+    func renameConfiguration(id: UUID, to name: String) -> Bool {
+        guard let idx = configurations.firstIndex(where: { $0.id == id }) else { return false }
+        let oldName = configurations[idx].name
+        configurations[idx].name = name
+        saveConfigurations()
+        if activeConfigurationName == oldName {
+            activeConfigurationName = name
+        }
+        return true
+    }
+
+    /// Stores a copy of any configuration, built-ins included, under a new name.
+    func duplicateConfiguration(_ config: MockConfiguration, name: String) -> MockConfiguration {
+        let copy = MockConfiguration(name: name, devices: config.devices.map { $0.withFreshIdentifiers() })
+        configurations.append(copy)
+        saveConfigurations()
+        return copy
+    }
+
     var allConfigurations: [MockConfiguration] {
         StockConfigurations.all + configurations
+    }
+}
+
+extension MockDevice {
+    /// A deep copy whose device, services, characteristics, and descriptors all
+    /// get new ids, so copies never share identifiers with their source.
+    func withFreshIdentifiers() -> MockDevice {
+        var d = self
+        d.id = UUID()
+        d.services = d.services.map { svc in
+            var s = svc
+            s.id = UUID()
+            s.characteristics = s.characteristics.map { ch in
+                var c = ch
+                c.id = UUID()
+                c.descriptors = c.descriptors.map { desc in
+                    var dd = desc
+                    dd.id = UUID()
+                    return dd
+                }
+                return c
+            }
+            return s
+        }
+        return d
     }
 }

@@ -11,7 +11,7 @@ public struct CaptureSheet: View {
     @State private var showUnnamed = false
     @State private var nameContains = ""
     @State private var advertisingService = ""
-    @State private var configurationName = Self.defaultConfigurationName()
+    @State private var configurationName = CaptureFilter.defaultConfigurationName()
     @State private var excludedDeviceIDs = Set<String>()
     @State private var isSavingConfiguration = false
 
@@ -20,8 +20,17 @@ public struct CaptureSheet: View {
         self.onClose = onClose
     }
 
+    private var filter: CaptureFilter {
+        CaptureFilter(
+            onlyConnectable: onlyConnectable,
+            showUnnamed: showUnnamed,
+            nameContains: nameContains,
+            advertisingService: advertisingService
+        )
+    }
+
     private var filteredDevices: [CapturedDevice] {
-        capture.devices.filter(matchesFilters)
+        capture.devices.filter(filter.matches)
     }
 
     private var selectedDevices: [CapturedDevice] {
@@ -298,37 +307,6 @@ public struct CaptureSheet: View {
     }
 
     private var requestedServiceUUIDs: [String] {
-        let service = advertisingService.trimmingCharacters(in: .whitespacesAndNewlines)
-        return service.isEmpty ? [] : [service.uppercased()]
-    }
-
-    private func matchesFilters(_ device: CapturedDevice) -> Bool {
-        if onlyConnectable && !device.isConnectable {
-            return false
-        }
-
-        if !showUnnamed && !device.hasName {
-            return false
-        }
-
-        let nameFilter = nameContains.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !nameFilter.isEmpty,
-           device.displayName.range(of: nameFilter, options: [.caseInsensitive, .diacriticInsensitive]) == nil {
-            return false
-        }
-
-        let serviceFilter = advertisingService.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
-        if !serviceFilter.isEmpty,
-           !device.advertisedServiceUUIDs.contains(where: { $0.uppercased() == serviceFilter }) {
-            return false
-        }
-
-        return true
-    }
-
-    private static func defaultConfigurationName() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH.mm"
-        return "Capture \(formatter.string(from: Date()))"
+        filter.requestedServiceUUIDs
     }
 }

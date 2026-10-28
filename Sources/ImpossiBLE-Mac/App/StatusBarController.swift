@@ -14,16 +14,23 @@ final class StatusBarController: NSObject, ObservableObject, NSWindowDelegate {
     private let store: MockStore
     private let server: MockServer
     private let modeController: ModeTransitionController<ProviderMode>
+    private let control: ProviderControlServer
     private var panel: StatusItemPanelController!
     private var captureWindow: NSWindow?
     private var deviceWindows: [UUID: NSWindow] = [:]
     private var cancellables: Set<AnyCancellable> = []
     private static let controlWindowContentSize = NSSize(width: 360, height: 580)
 
-    init(store: MockStore, server: MockServer, modeController: ModeTransitionController<ProviderMode>) {
+    init(
+        store: MockStore,
+        server: MockServer,
+        modeController: ModeTransitionController<ProviderMode>,
+        control: ProviderControlServer
+    ) {
         self.store = store
         self.server = server
         self.modeController = modeController
+        self.control = control
         super.init()
         panel = StatusItemPanelController(
             title: "ImpossiBLE Mock",
@@ -37,6 +44,7 @@ final class StatusBarController: NSObject, ObservableObject, NSWindowDelegate {
                 transport: self.server.transport,
                 activity: self.server.passthroughActivity,
                 controller: self.modeController,
+                control: self.control,
                 onDismiss: { [weak self] in self?.panel.hidePanel() },
                 onOpenCapture: { [weak self] in self?.openCaptureWindow() },
                 onOpenDevice: { [weak self] deviceId in self?.openDeviceEditor(deviceId) }

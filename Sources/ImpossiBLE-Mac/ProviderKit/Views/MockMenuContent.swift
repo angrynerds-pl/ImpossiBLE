@@ -11,6 +11,7 @@ public struct MockMenuContent: View {
     @ObservedObject var transport: ProtocolServer
     @ObservedObject var activity: PassthroughActivityMonitor
     @ObservedObject var controller: ModeTransitionController<ProviderMode>
+    var control: ProviderControlServer?
     var onDismiss: (() -> Void)?
     var onOpenCapture: (() -> Void)?
     var onOpenDevice: ((UUID) -> Void)?
@@ -29,6 +30,7 @@ public struct MockMenuContent: View {
         transport: ProtocolServer,
         activity: PassthroughActivityMonitor,
         controller: ModeTransitionController<ProviderMode>,
+        control: ProviderControlServer? = nil,
         onDismiss: (() -> Void)? = nil,
         onOpenCapture: (() -> Void)? = nil,
         onOpenDevice: ((UUID) -> Void)? = nil
@@ -38,6 +40,7 @@ public struct MockMenuContent: View {
         self.transport = transport
         self.activity = activity
         self.controller = controller
+        self.control = control
         self.onDismiss = onDismiss
         self.onOpenCapture = onOpenCapture
         self.onOpenDevice = onOpenDevice
@@ -133,6 +136,10 @@ public struct MockMenuContent: View {
                 acknowledge(newValue ? "Panel auto-hides" : "Panel stays open")
             }
 
+            if let control {
+                AgentControlToggle(control: control, acknowledge: acknowledge)
+            }
+
             Spacer()
 
             if !settingsAck.isEmpty {
@@ -154,5 +161,48 @@ public struct MockMenuContent: View {
             .foregroundStyle(.secondary)
         }
         .padding(12)
+    }
+}
+
+/// Footer toggle for MCP agent control, with a dot while an agent is connected.
+private struct AgentControlToggle: View {
+    @ObservedObject var control: ProviderControlServer
+    let acknowledge: (String) -> Void
+
+    var body: some View {
+        IconToggle(
+            systemImage: "terminal",
+            help: helpText,
+            isOn: Binding(
+                get: { control.isEnabled },
+                set: { newValue in
+                    control.setEnabled(newValue)
+                    acknowledge(newValue ? "Agents can control ImpossiBLE" : "Agent control off")
+                }
+            )
+        )
+        .overlay(alignment: .topTrailing) {
+            if control.isEnabled && control.connectedAgents > 0 {
+                Circle()
+                    .fill(Color.green)
+                    .frame(width: 6, height: 6)
+                    .offset(x: -2, y: 2)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    private var helpText: String {
+        guard control.isEnabled else {
+            return "Let AI agents control ImpossiBLE over MCP (impossible-mcp)"
+        }
+        switch control.status {
+            case .blocked(let reason), .failed(let reason):
+                return "Agent control (MCP) unavailable: \(reason)"
+            default:
+                let count = control.connectedAgents
+                let agents = count == 0 ? "no agent connected" : "\(count) agent\(count == 1 ? "" : "s") connected"
+                return "Agent control (MCP) on — \(agents)"
+        }
     }
 }

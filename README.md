@@ -156,6 +156,18 @@ Capture results hide unnamed devices by default and sort likely useful devices f
 
 When you save a capture, ImpossiBLE performs a deeper inspection for selected connectable devices before writing the configuration. It connects to each device, discovers services, characteristics, and descriptors, and reads values where CoreBluetooth allows reads. Devices that are not connectable, fail to connect, or time out are still saved from their advertisement data. Secured characteristics may fail or trigger normal pairing/security behavior from macOS.
 
+## Agent Control (MCP)
+
+AI agents such as Claude Code can drive ImpossiBLE through a local [MCP](https://modelcontextprotocol.io) server: switch between **Off / Mock / Passthrough**, list, select, create, rename, duplicate, and delete mock configurations, edit the devices being served, record real devices with a capture (including the deep GATT inspection), and watch passthrough traffic.
+
+The MCP server is `impossible-mcp`, bundled inside the app. Register it with your agent, e.g. for Claude Code:
+
+```bash
+claude mcp add impossible -- ~/.local/bin/ImpossiBLE-Mac.app/Contents/Helpers/impossible-mcp
+```
+
+It talks to the running menu bar app over `/tmp/impossible-control.sock` (accessible only to your user) and launches the app when it is not running. Agent control can be switched off with the terminal icon in the panel footer; a green dot on it means an agent is connected. Configurations an app uploads itself are reported to agents but never edited by them.
+
 ## Makefile Targets
 
 | Target    | Description                                        |
