@@ -103,13 +103,67 @@ enum ControlDTO {
             "id": device.id,
             "name": device.displayName,
             "hasName": device.hasName,
-            "rssi": device.rssi,
+            "rssi": device.rssi ?? NSNull(),
             "isConnectable": device.isConnectable,
             "advertisedServiceUUIDs": device.advertisedServiceUUIDs,
             "seenCount": device.seenCount,
         ]
         if let data = device.manufacturerData {
             json["manufacturerData"] = hex(data)
+        }
+        return json
+    }
+
+    static func activityEvent(_ event: MockActivityEvent, deviceNames: [String: String], formatter: ISO8601DateFormatter) -> [String: Any] {
+        var json: [String: Any] = [
+            "seq": event.sequence,
+            "at": formatter.string(from: event.date),
+            "kind": event.kind,
+        ]
+        if let deviceID = event.deviceID {
+            json["deviceId"] = deviceID
+            if let name = deviceNames[deviceID] {
+                json["device"] = name
+            }
+        }
+        if let service = event.serviceUUID {
+            json["service"] = service
+        }
+        if let characteristic = event.characteristicUUID {
+            json["characteristic"] = characteristic
+        }
+        if let descriptor = event.descriptorUUID {
+            json["descriptor"] = descriptor
+        }
+        if let detail = event.detail {
+            json["detail"] = detail
+        }
+        addValue(event.value, to: &json)
+        return json
+    }
+
+    static func failureRule(_ rule: MockFailureRule, deviceNames: [String: String]) -> [String: Any] {
+        var json: [String: Any] = [
+            "id": rule.id,
+            "operation": rule.operation.rawValue,
+            "deviceId": rule.deviceID,
+            "remaining": rule.remaining.map { $0 as Any } ?? "untilCleared",
+        ]
+        if let name = deviceNames[rule.deviceID] {
+            json["device"] = name
+        }
+        if let characteristic = rule.characteristicUUID {
+            json["characteristic"] = characteristic
+        }
+        switch rule.behavior {
+            case .error(let message, let attError):
+                json["behavior"] = "error"
+                json["error"] = message
+                if rule.operation == .read || rule.operation == .write {
+                    json["attError"] = attError
+                }
+            case .noResponse:
+                json["behavior"] = "noResponse"
         }
         return json
     }
@@ -258,8 +312,10 @@ enum ControlDTO {
         }
     }
 
-    /// `value` is hex; `valueText` is UTF-8 text. Giving both is ambiguous.
-    private static func decodeValue(_ json: [String: Any], path: String) throws -> Data? {
+    /// `value` is hex; `valueText` is UTF-8 text. Both may be given when they
+    /// agree — the encoder emits both, so a device read with get_device can be
+    /// sent back unchanged — but conflicting ones are refused.
+    static func decodeValue(_ json: [String: Any], path: String) throws -> Data? {
         let hexValue = json["value"].flatMap { $0 is NSNull ? nil : $0 }
         let textValue = json["valueText"].flatMap { $0 is NSNull ? nil : $0 }
         switch (hexValue, textValue) {
@@ -269,8 +325,12 @@ enum ControlDTO {
                 return try optionalHex(hex, field: "\(path).value")
             case (nil, let text?):
                 return Data(try string(text, field: "\(path).valueText").utf8)
-            case (.some, .some):
-                throw ToolError("\(path): give either value (hex) or valueText, not both")
+            case (let hex?, let text?):
+                let data = try optionalHex(hex, field: "\(path).value")
+                guard let data, printableText(data) == (try string(text, field: "\(path).valueText")) else {
+                    throw ToolError("\(path): value and valueText disagree; give only one")
+                }
+                return data
         }
     }
 

@@ -4,7 +4,9 @@ import ImpossiBLEPassthroughCore
 struct CapturedDevice: Identifiable, Hashable {
     let id: String
     var name: String
-    var rssi: Int
+    /// nil until a real reading arrives: CoreBluetooth reports 127 when the
+    /// RSSI is unavailable, which would otherwise rank as the strongest signal.
+    var rssi: Int?
     var isConnectable: Bool
     var advertisedServiceUUIDs: [String]
     var manufacturerData: Data?
@@ -28,7 +30,9 @@ struct CapturedDevice: Identifiable, Hashable {
         var device = MockDevice()
         device.id = UUID(uuidString: id) ?? UUID()
         device.name = displayName
-        device.rssi = rssi
+        if let rssi {
+            device.rssi = rssi
+        }
         device.isConnectable = isConnectable
         device.isEnabled = true
         device.advertisedServiceUUIDs = advertisedServiceUUIDs
@@ -189,7 +193,7 @@ final class CaptureSession: ObservableObject {
         let adv = message["adv"] as? [String: Any] ?? [:]
         let advertisedName = adv["kCBAdvDataLocalName"] as? String
         let name = (message["name"] as? String) ?? advertisedName ?? ""
-        let rssi = (message["rssi"] as? NSNumber)?.intValue ?? 0
+        let rssi = (message["rssi"] as? NSNumber).map(\.intValue).flatMap { $0 == Self.unavailableRSSI ? nil : $0 }
         let connectable = (adv["kCBAdvDataIsConnectable"] as? NSNumber)?.boolValue ?? true
         let serviceUUIDs = (adv["kCBAdvDataServiceUUIDs"] as? [String] ?? [])
             .map { $0.uppercased() }
@@ -218,7 +222,9 @@ final class CaptureSession: ObservableObject {
         if !name.isEmpty {
             device.name = name
         }
-        device.rssi = rssi
+        if let rssi {
+            device.rssi = rssi
+        }
         device.isConnectable = connectable
         if !serviceUUIDs.isEmpty {
             device.advertisedServiceUUIDs = serviceUUIDs
@@ -238,6 +244,8 @@ final class CaptureSession: ObservableObject {
         }
     }
 
+    private static let unavailableRSSI = 127
+
     private func send(_ message: [String: Any]) {
         bridge?.handleMessage(message)
     }
@@ -256,7 +264,7 @@ final class CaptureSession: ObservableObject {
             return lhs.manufacturerData != nil
         }
         if lhs.rssi != rhs.rssi {
-            return lhs.rssi > rhs.rssi
+            return (lhs.rssi ?? Int.min) > (rhs.rssi ?? Int.min)
         }
         return lhs.displayName.localizedCaseInsensitiveCompare(rhs.displayName) == .orderedAscending
     }

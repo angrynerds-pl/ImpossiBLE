@@ -196,7 +196,7 @@ public struct CaptureSheet: View {
             Spacer()
 
             VStack(alignment: .trailing, spacing: 3) {
-                Text("\(device.rssi) dBm")
+                Text(device.rssi.map { "\($0) dBm" } ?? "— dBm")
                     .font(.caption.weight(.semibold))
                 Text("\(device.seenCount)x")
                     .font(.caption2)

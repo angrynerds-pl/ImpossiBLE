@@ -71,7 +71,12 @@ Agents drive the provider through a tools-only MCP server. The MCP logic lives i
 - `set_mode` skips re-selecting the current mode, which would otherwise bounce the server and drop the connected app.
 - Agent capture uses its **own** `CaptureSession`, independent of the capture window and the serving bridge. Filter/selection logic is shared with the window through `CaptureFilter`.
 - `initialize` is answered but not required, so the shim can reconnect transparently after an app relaunch; requests in flight when the socket drops are answered by the shim with a JSON-RPC error.
+- **Live mock simulation lives in `MockServer`** (the `Agent control` extension), because it acts on per-client session state on the transport's I/O queue: pushed values go into `writtenCharValues` (so later reads return them, and they die with the client like app writes do), notifications reuse the unsolicited `didUpdateValue` the library already handles, and `disconnect_device` shares `sendDisconnect` with `cancel`. Characteristics are addressed by rebuilding the discovery wire id (`MockDevice.characteristicAddress`); if discovery's id format changes, that helper must change with it.
+- **Every mock handler records to `activityLog` and checks `consumeFailure` before answering.** A new handler that skips either is invisible to `mock_activity` or immune to `inject_failure`. Failure rules and the log survive client changes; rules fire only in mock mode. Read/write errors carry `errorDomain`/`errorCode` (`CBATTErrorDomain`) because only those two replies are parsed with `cbs_error_from_msg`; the other replies take an error string.
+- Live tools resolve devices among what is *served* (`servedDevice`: the app's uploaded configuration while there is one), not just the working set — they never write to it, so the client-supplied invariants hold.
 - The shim is bundled at `Contents/Helpers/impossible-mcp`, **not** `Contents/MacOS`: `mac-stop`/`mac-relaunch` `pkill -f ".app/Contents/MacOS"` and must not kill agents' shims. It is signed before the bundle (the bundle signature does not cover `Helpers` without `--deep`). With no app running it `open -g`s the enclosing `.app` (falling back to the bundle id) and waits up to 15 s.
+
+`make install` links `$(prefix)/bin/impossible-mcp` to the bundled shim; the shim resolves symlinks to find its app.
 
 Smoke test without an agent: pipe newline-delimited JSON-RPC (`initialize`, `tools/list`, `tools/call`) into `ImpossiBLE-Mac.app/Contents/Helpers/impossible-mcp`.
 
@@ -102,6 +107,7 @@ Use these checks before preparing changes for commit:
 ```bash
 make mac-clean mac
 cd Sources/ImpossiBLE-Mac && swift build   # standalone SPM check
+cd Sources/ImpossiBLE-Mac && swift test    # ProviderKit tests (DTOs, MCP session, control socket, store)
 xcodebuild -project SampleApp/SampleApp.xcodeproj -scheme SampleApp -sdk iphonesimulator -configuration Debug -destination 'generic/platform=iOS Simulator' build
 plutil -lint Sources/ImpossiBLE-Mac/Resources/Info.plist Sources/ImpossiBLE-Mac/Resources/entitlements.plist
 ```
@@ -139,8 +145,8 @@ When cutting a new ImpossiBLE release:
   Formula/impossible.rb`, then commit and push the tap update. Note: since
   3.0.0 there is no `impossible-helper` anymore — the formula must only build
   and install the Mac app. It should also link
-  `ImpossiBLE-Mac.app/Contents/Helpers/impossible-mcp` into `bin` so agents
-  can be pointed at a stable path.
+  `ImpossiBLE-Mac.app/Contents/Helpers/impossible-mcp` into `bin` (as
+  `make install` does) so agents can be pointed at a stable path.
 
 ## Generated Artifacts
 

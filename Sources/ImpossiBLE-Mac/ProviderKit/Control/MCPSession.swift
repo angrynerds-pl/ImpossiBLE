@@ -121,6 +121,9 @@ final class MCPSession {
         (off). Start with get_status. In mock mode the simulator sees the enabled devices of the working \
         set; load one with select_configuration, edit it with the device tools, or record real devices with \
         capture_start → capture_results → capture_save. If the app uploaded its own configuration, that one \
-        is served instead and cannot be edited here.
+        is served instead and cannot be edited here. To test an app in mock mode: drive it with \
+        set_characteristic_value (live values and notifications), disconnect_device, and inject_failure, \
+        and check what it did with mock_activity (reads, writes with their bytes, subscriptions). \
+        export_configuration turns a configuration into a fixture for ImpossiBLESetMockConfiguration().
         """
 }

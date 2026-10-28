@@ -5,21 +5,27 @@ public final class MockStore: ObservableObject {
     @Published var devices: [MockDevice] = []
     @Published var configurations: [MockConfiguration] = []
     @Published var activeConfigurationName: String = "" {
-        didSet { UserDefaults.standard.set(activeConfigurationName, forKey: "ActiveConfigurationName") }
+        didSet { defaults.set(activeConfigurationName, forKey: "ActiveConfigurationName") }
     }
 
     private let devicesURL: URL
     private let configsURL: URL
+    private let defaults: UserDefaults
 
-    public init() {
+    public convenience init() {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport.appendingPathComponent("ImpossiBLE", isDirectory: true)
+        self.init(directory: appSupport.appendingPathComponent("ImpossiBLE", isDirectory: true), defaults: .standard)
+    }
+
+    /// Lets tests keep their state away from the user's configurations.
+    init(directory dir: URL, defaults: UserDefaults) {
+        self.defaults = defaults
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         self.devicesURL = dir.appendingPathComponent("mock-devices.json")
         self.configsURL = dir.appendingPathComponent("mock-configurations.json")
         loadConfigurations()
         loadDevices()
-        activeConfigurationName = UserDefaults.standard.string(forKey: "ActiveConfigurationName") ?? ""
+        activeConfigurationName = defaults.string(forKey: "ActiveConfigurationName") ?? ""
     }
 
     // MARK: - Active Devices

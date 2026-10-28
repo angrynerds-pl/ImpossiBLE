@@ -52,7 +52,7 @@ help:
 	@echo "  mac-clean  Remove Mac build artifacts"
 	@echo ""
 	@echo "General:"
-	@echo "  install     Build and install the Mac app to \$$(prefix)/bin  [$(prefix)]"
+	@echo "  install     Build and install the Mac app (and the impossible-mcp link) to \$$(prefix)/bin  [$(prefix)]"
 	@echo "  uninstall   Remove installed files from \$$(prefix)/bin"
 	@echo "  clean       Remove all build artifacts"
 	@echo ""
@@ -68,9 +68,11 @@ mac-install: mac
 	rm -rf $(INSTALLED_MAC_APP)
 	cp -R $(MAC_BUNDLE) $(INSTALL_DIR)/
 	@xattr -cr $(INSTALLED_MAC_APP) 2>/dev/null || true
+	ln -sf $(INSTALLED_MAC_APP)/Contents/Helpers/$(MAC_MCP_NAME) $(INSTALL_DIR)/$(MAC_MCP_NAME)
 
 uninstall:
 	rm -rf $(INSTALLED_MAC_APP)
+	rm -f $(INSTALL_DIR)/$(MAC_MCP_NAME)
 	rm -rf $(LEGACY_HELPER_APP)
 	rm -f $(LEGACY_HELPER_WRAPPER)
 	@echo "Uninstalled from $(INSTALL_DIR)"

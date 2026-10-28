@@ -46,6 +46,8 @@ public final class MockServer: ObservableObject {
     // Guarded by the transport's I/O queue
     private var serveMode: ServeMode = .mock
     private var currentClient: SocketClientInfo?
+    /// Separate from `currentClient`, which is nil when the peer pid lookup fails.
+    private var isClientConnected = false
     private var connectedPeripherals = Set<String>()
     private var pairedPeripherals = Set<String>()
     private var scanActive = false
@@ -57,6 +59,12 @@ public final class MockServer: ObservableObject {
     /// memory only: it must never overwrite the user's saved configurations,
     /// and it dies with the connection that supplied it.
     private var clientSuppliedDevices: [MockDevice]?
+    /// What the app did in mock mode, for agents. Survives client changes so
+    /// a reconnect is visible in the log rather than wiping it.
+    private var activityLog = MockActivityLog()
+    /// Failures armed by agents, consumed by matching requests.
+    private var failureRules: [MockFailureRule] = []
+    private var nextFailureRuleID = 1
     /// Created on first Passthrough start and kept for the process lifetime;
     /// instantiating it triggers the one-time macOS Bluetooth consent prompt.
     private var passthroughBridge: CBSPassthroughBridge?
@@ -75,8 +83,14 @@ public final class MockServer: ObservableObject {
         transport.onClientConnected = { [weak self] client in
             self?.handleClientConnected(client)
         }
-        transport.onClientTeardown = { [weak self] _ in
-            self?.tearDownClientState()
+        transport.onClientTeardown = { [weak self] reason in
+            guard let self else { return }
+            if self.serveMode == .mock {
+                self.activityLog.append("appDisconnected", detail: "\(reason)")
+            }
+            self.currentClient = nil
+            self.isClientConnected = false
+            self.tearDownClientState()
         }
 
         if autoStart, UserDefaults.standard.bool(forKey: Self.serverEnabledKey) {
@@ -108,7 +122,11 @@ public final class MockServer: ObservableObject {
 
     private func handleClientConnected(_ client: SocketClientInfo?) {
         currentClient = client
+        isClientConnected = true
         tearDownClientState()
+        if serveMode == .mock {
+            activityLog.append("appConnected", detail: client?.displayText)
+        }
     }
 
     /// Everything the previous client owned, in both modes. Runs on connect,
@@ -254,6 +272,7 @@ public final class MockServer: ObservableObject {
         let serviceFilter: [String]? = (msg["services"] as? [String])?.isEmpty == false
             ? msg["services"] as? [String]
             : nil
+        activityLog.append("scan", detail: serviceFilter.map { "services: \($0.joined(separator: ", "))" })
 
         sendDiscoveries(serviceFilter: serviceFilter)
 
@@ -272,6 +291,9 @@ public final class MockServer: ObservableObject {
     }
 
     private func handleStopScan() {
+        if scanActive {
+            activityLog.append("stopScan")
+        }
         scanActive = false
         scanTimer?.cancel()
         scanTimer = nil
@@ -321,6 +343,13 @@ public final class MockServer: ObservableObject {
 
     private func handleConnect(_ msg: [String: Any]) {
         guard let uuidStr = msg["id"] as? String else { return }
+        let connectFailure = consumeFailure(.connect, deviceID: uuidStr)
+        activityLog.append("connect", deviceID: uuidStr, detail: connectFailure?.summary)
+        if let rule = connectFailure {
+            guard case .error(let message, _) = rule.behavior else { return }
+            transport.send(["type": "didFailConnect", "id": uuidStr, "error": message])
+            return
+        }
         guard let device = fetchDevice(uuid: uuidStr), device.isConnectable else {
             transport.send(["type": "didFailConnect", "id": uuidStr, "error": "Device not connectable"])
             return
@@ -332,6 +361,13 @@ public final class MockServer: ObservableObject {
 
     private func handleCancel(_ msg: [String: Any]) {
         guard let uuidStr = msg["id"] as? String else { return }
+        activityLog.append("cancelConnection", deviceID: uuidStr)
+        sendDisconnect(uuidStr, error: "")
+    }
+
+    /// Drops the peripheral's connection state and tells the app. An empty
+    /// error is a disconnect the app asked for; anything else is unexpected.
+    private func sendDisconnect(_ uuidStr: String, error: String) {
         connectedPeripherals.remove(uuidStr)
         pairedPeripherals.remove(uuidStr)
         notifyingCharacteristics = notifyingCharacteristics.filter { !$0.hasPrefix(uuidStr) }
@@ -339,7 +375,7 @@ public final class MockServer: ObservableObject {
         transport.send([
             "type": "didDisconnect",
             "id": uuidStr,
-            "error": "",
+            "error": error,
             "timestamp": CFAbsoluteTimeGetCurrent(),
             "isReconnecting": false,
         ])
@@ -351,6 +387,14 @@ public final class MockServer: ObservableObject {
         guard let uuidStr = msg["id"] as? String else { return }
         let rawFilter = msg["services"] as? [String]
         let filterUUIDs: [String]? = (rawFilter?.isEmpty == false) ? rawFilter!.map { $0.uppercased() } : nil
+
+        let discoveryFailure = consumeFailure(.discoverServices, deviceID: uuidStr)
+        activityLog.append("discoverServices", deviceID: uuidStr, detail: discoveryFailure?.summary)
+        if let rule = discoveryFailure {
+            guard case .error(let message, _) = rule.behavior else { return }
+            transport.send(["type": "didDiscoverServices", "id": uuidStr, "services": [] as [[String: Any]], "error": message])
+            return
+        }
 
         guard let device = fetchDevice(uuid: uuidStr) else {
             transport.note("discoverServices: device not found for \(uuidStr)")
@@ -405,6 +449,21 @@ public final class MockServer: ObservableObject {
         let peripheralUUID = String(parts[0])
         let serviceUUID = String(parts[1])
         let serviceIdx = Int(parts[2]) ?? 0
+
+        let discoveryFailure = consumeFailure(.discoverCharacteristics, deviceID: peripheralUUID)
+        activityLog.append("discoverCharacteristics", deviceID: peripheralUUID, serviceUUID: serviceUUID,
+                           detail: discoveryFailure?.summary)
+        if let rule = discoveryFailure {
+            guard case .error(let message, _) = rule.behavior else { return }
+            transport.send([
+                "type": "didDiscoverCharacteristics",
+                "id": peripheralUUID,
+                "serviceId": serviceId,
+                "characteristics": [] as [[String: Any]],
+                "error": message,
+            ])
+            return
+        }
 
         guard let device = fetchDevice(uuid: peripheralUUID),
               serviceIdx < device.services.count,
@@ -478,7 +537,16 @@ public final class MockServer: ObservableObject {
         let serviceIdx = Int(parts[2]) ?? 0
         let charIdx = Int(parts[4]) ?? 0
 
+        if let rule = consumeFailure(.read, deviceID: peripheralUUID, characteristicUUID: String(parts[3])) {
+            activityLog.append("read", deviceID: peripheralUUID, serviceUUID: String(parts[1]),
+                               characteristicUUID: String(parts[3]), detail: rule.summary)
+            sendInjectedATTError(rule, type: "didUpdateValue", peripheralUUID: peripheralUUID, idKey: "characteristicId", idValue: charId)
+            return
+        }
+
         guard checkSecurity(peripheralUUID: peripheralUUID, serviceIdx: serviceIdx, charIdx: charIdx) else {
+            activityLog.append("read", deviceID: peripheralUUID, serviceUUID: String(parts[1]),
+                               characteristicUUID: String(parts[3]), detail: "insufficient authentication")
             sendAuthError(type: "didUpdateValue", peripheralUUID: peripheralUUID, idKey: "characteristicId", idValue: charId)
             return
         }
@@ -494,6 +562,8 @@ public final class MockServer: ObservableObject {
             value = nil
         }
 
+        activityLog.append("read", deviceID: peripheralUUID, serviceUUID: String(parts[1]),
+                           characteristicUUID: String(parts[3]), value: value)
         transport.send([
             "type": "didUpdateValue",
             "id": peripheralUUID,
@@ -511,18 +581,30 @@ public final class MockServer: ObservableObject {
         let serviceIdx = Int(parts[2]) ?? 0
         let charIdx = Int(parts[4]) ?? 0
 
+        let writeType = (msg["writeType"] as? Int) ?? 0
+        let written = (msg["value"] as? String).flatMap { Data(base64Encoded: $0) } ?? Data()
+        let kind = writeType == 0 ? "write" : "writeWithoutResponse"
+
+        if let rule = consumeFailure(.write, deviceID: peripheralUUID, characteristicUUID: String(parts[3])) {
+            activityLog.append(kind, deviceID: peripheralUUID, serviceUUID: String(parts[1]),
+                               characteristicUUID: String(parts[3]), value: written, detail: rule.summary)
+            if writeType == 0 {
+                sendInjectedATTError(rule, type: "didWriteValue", peripheralUUID: peripheralUUID, idKey: "characteristicId", idValue: charId)
+            }
+            return
+        }
+
         guard checkSecurity(peripheralUUID: peripheralUUID, serviceIdx: serviceIdx, charIdx: charIdx) else {
+            activityLog.append(kind, deviceID: peripheralUUID, serviceUUID: String(parts[1]),
+                               characteristicUUID: String(parts[3]), value: written, detail: "insufficient authentication")
             sendAuthError(type: "didWriteValue", peripheralUUID: peripheralUUID, idKey: "characteristicId", idValue: charId)
             return
         }
 
-        if let b64 = msg["value"] as? String, !b64.isEmpty {
-            writtenCharValues[charId] = Data(base64Encoded: b64)
-        } else {
-            writtenCharValues[charId] = Data()
-        }
+        writtenCharValues[charId] = written
+        activityLog.append(kind, deviceID: peripheralUUID, serviceUUID: String(parts[1]),
+                           characteristicUUID: String(parts[3]), value: written)
 
-        let writeType = (msg["writeType"] as? Int) ?? 0
         if writeType == 0 {
             transport.send([
                 "type": "didWriteValue",
@@ -546,6 +628,22 @@ public final class MockServer: ObservableObject {
         } else {
             descIdx = 0
         }
+        let descriptorUUID = parts.count >= 6 ? String(parts[5]) : nil
+
+        if let rule = consumeFailure(.readDescriptor, deviceID: peripheralUUID, characteristicUUID: String(parts[3])) {
+            activityLog.append("readDescriptor", deviceID: peripheralUUID, serviceUUID: String(parts[1]),
+                               characteristicUUID: String(parts[3]), descriptorUUID: descriptorUUID, detail: rule.summary)
+            guard case .error(let message, _) = rule.behavior else { return }
+            transport.send([
+                "type": "didUpdateDescriptorValue",
+                "id": peripheralUUID,
+                "descriptorId": descId,
+                "value": NSNull(),
+                "valueB64": "",
+                "error": message,
+            ])
+            return
+        }
 
         let value: Data?
         if let written = writtenDescValues[descId] {
@@ -559,6 +657,8 @@ public final class MockServer: ObservableObject {
             value = nil
         }
 
+        activityLog.append("readDescriptor", deviceID: peripheralUUID, serviceUUID: String(parts[1]),
+                           characteristicUUID: String(parts[3]), descriptorUUID: descriptorUUID, value: value)
         transport.send([
             "type": "didUpdateDescriptorValue",
             "id": peripheralUUID,
@@ -574,10 +674,30 @@ public final class MockServer: ObservableObject {
         let parts = descId.split(separator: ":")
         guard parts.count >= 1 else { return }
         let peripheralUUID = String(parts[0])
+        let serviceUUID = parts.count >= 2 ? String(parts[1]) : nil
+        let characteristicUUID = parts.count >= 4 ? String(parts[3]) : nil
+        let descriptorUUID = parts.count >= 6 ? String(parts[5]) : nil
+        let written = (msg["value"] as? String).flatMap { $0.isEmpty ? nil : Data(base64Encoded: $0) }
 
-        if let b64 = msg["value"] as? String, !b64.isEmpty {
-            writtenDescValues[descId] = Data(base64Encoded: b64)
+        if let rule = consumeFailure(.writeDescriptor, deviceID: peripheralUUID, characteristicUUID: characteristicUUID) {
+            activityLog.append("writeDescriptor", deviceID: peripheralUUID, serviceUUID: serviceUUID,
+                               characteristicUUID: characteristicUUID, descriptorUUID: descriptorUUID,
+                               value: written, detail: rule.summary)
+            guard case .error(let message, _) = rule.behavior else { return }
+            transport.send([
+                "type": "didWriteDescriptorValue",
+                "id": peripheralUUID,
+                "descriptorId": descId,
+                "error": message,
+            ])
+            return
         }
+
+        if let written {
+            writtenDescValues[descId] = written
+        }
+        activityLog.append("writeDescriptor", deviceID: peripheralUUID, serviceUUID: serviceUUID,
+                           characteristicUUID: characteristicUUID, descriptorUUID: descriptorUUID, value: written)
 
         transport.send([
             "type": "didWriteDescriptorValue",
@@ -603,7 +723,25 @@ public final class MockServer: ObservableObject {
         let parts = charId.split(separator: ":")
         guard parts.count >= 1 else { return }
         let peripheralUUID = String(parts[0])
+        let serviceUUID = parts.count >= 2 ? String(parts[1]) : nil
+        let characteristicUUID = parts.count >= 4 ? String(parts[3]) : nil
+        let kind = enabled ? "subscribe" : "unsubscribe"
 
+        if let rule = consumeFailure(.setNotify, deviceID: peripheralUUID, characteristicUUID: characteristicUUID) {
+            activityLog.append(kind, deviceID: peripheralUUID, serviceUUID: serviceUUID,
+                               characteristicUUID: characteristicUUID, detail: rule.summary)
+            guard case .error(let message, _) = rule.behavior else { return }
+            transport.send([
+                "type": "didUpdateNotification",
+                "id": peripheralUUID,
+                "characteristicId": charId,
+                "enabled": !enabled,
+                "error": message,
+            ])
+            return
+        }
+
+        activityLog.append(kind, deviceID: peripheralUUID, serviceUUID: serviceUUID, characteristicUUID: characteristicUUID)
         if enabled {
             notifyingCharacteristics.insert(charId)
         } else {
@@ -623,6 +761,13 @@ public final class MockServer: ObservableObject {
 
     private func handleReadRSSI(_ msg: [String: Any]) {
         guard let uuidStr = msg["id"] as? String else { return }
+        let rssiFailure = consumeFailure(.readRSSI, deviceID: uuidStr)
+        activityLog.append("readRSSI", deviceID: uuidStr, detail: rssiFailure?.summary)
+        if let rule = rssiFailure {
+            guard case .error(let message, _) = rule.behavior else { return }
+            transport.send(["type": "didReadRSSI", "id": uuidStr, "rssi": 0, "error": message])
+            return
+        }
         let device = fetchDevice(uuid: uuidStr)
 
         transport.send([
@@ -683,6 +828,38 @@ public final class MockServer: ObservableObject {
         ])
     }
 
+    // MARK: - Injected failures (I/O queue)
+
+    /// The first armed rule matching the request, with its count consumed.
+    private func consumeFailure(_ operation: MockOperation, deviceID: String, characteristicUUID: String? = nil) -> MockFailureRule? {
+        guard let index = failureRules.firstIndex(where: {
+            $0.matches(operation, deviceID: deviceID, characteristicUUID: characteristicUUID)
+        }) else { return nil }
+        let rule = failureRules[index]
+        if let remaining = rule.remaining {
+            if remaining <= 1 {
+                failureRules.remove(at: index)
+            } else {
+                failureRules[index].remaining = remaining - 1
+            }
+        }
+        transport.note("Injected failure: \(operation.rawValue)")
+        return rule
+    }
+
+    private func sendInjectedATTError(_ rule: MockFailureRule, type: String, peripheralUUID: String, idKey: String, idValue: String) {
+        guard case .error(let message, let attError) = rule.behavior else { return }
+        transport.send([
+            "type": type,
+            "id": peripheralUUID,
+            idKey: idValue,
+            "value": "",
+            "error": message,
+            "errorDomain": "CBATTErrorDomain",
+            "errorCode": attError,
+        ])
+    }
+
     // MARK: - Utilities
 
     private func publishDeviceState() {
@@ -691,6 +868,137 @@ public final class MockServer: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.connectedDeviceIDs = connected
             self?.pairedDeviceIDs = paired
+        }
+    }
+}
+
+// MARK: - Agent control
+
+/// The live levers agents pull in mock mode. Each call hops to the transport's
+/// I/O queue, where the session state lives, and completes on the main thread.
+extension MockServer {
+    struct LiveState {
+        let isMockServing: Bool
+        let connectedDeviceIDs: [String]
+        /// (deviceID, serviceUUID, characteristicUUID) the app subscribed to.
+        let subscriptions: [(String, String, String)]
+    }
+
+    struct ValuePush {
+        let isConnected: Bool
+        let isSubscribed: Bool
+        let notified: Bool
+    }
+
+    /// Replaces the value the app reads for one characteristic for the rest of
+    /// the session — the stored configuration is untouched — and, when the app
+    /// is subscribed and `notify` is set, delivers it as a notification.
+    func pushValue(_ value: Data, to address: MockCharacteristicAddress, notify: Bool,
+                   completion: @escaping (Result<ValuePush, ToolError>) -> Void) {
+        transport.performOnIOQueue { [self] in
+            guard serveMode == .mock, isClientConnected else {
+                let error = ToolError(serveMode == .mock
+                    ? "No simulator app is connected"
+                    : "Values can only be pushed in mock mode")
+                DispatchQueue.main.async { completion(.failure(error)) }
+                return
+            }
+            writtenCharValues[address.wireID] = value
+            let connected = connectedPeripherals.contains(address.deviceID)
+            let subscribed = notifyingCharacteristics.contains(address.wireID)
+            let notified = notify && connected && subscribed
+            if notified {
+                transport.send([
+                    "type": "didUpdateValue",
+                    "id": address.deviceID,
+                    "characteristicId": address.wireID,
+                    "value": value.base64EncodedString(),
+                    "error": "",
+                ])
+            }
+            activityLog.append(notified ? "notify" : "setValue", deviceID: address.deviceID,
+                               serviceUUID: address.serviceUUID, characteristicUUID: address.characteristicUUID,
+                               value: value, detail: "by agent")
+            let push = ValuePush(isConnected: connected, isSubscribed: subscribed, notified: notified)
+            DispatchQueue.main.async { completion(.success(push)) }
+        }
+    }
+
+    /// Drops a connected peripheral as if the link was lost.
+    func disconnectPeripheral(_ deviceID: String, error: String,
+                              completion: @escaping (Result<Void, ToolError>) -> Void) {
+        transport.performOnIOQueue { [self] in
+            guard serveMode == .mock, connectedPeripherals.contains(deviceID) else {
+                let failure = ToolError(serveMode == .mock
+                    ? "The app is not connected to that device"
+                    : "Devices can only be disconnected in mock mode")
+                DispatchQueue.main.async { completion(.failure(failure)) }
+                return
+            }
+            activityLog.append("disconnect", deviceID: deviceID, detail: "by agent: \(error)")
+            sendDisconnect(deviceID, error: error)
+            DispatchQueue.main.async { completion(.success(())) }
+        }
+    }
+
+    func addFailure(operation: MockOperation, deviceID: String, characteristicUUID: String?,
+                    behavior: MockFailureRule.Behavior, count: Int?,
+                    completion: @escaping (MockFailureRule) -> Void) {
+        transport.performOnIOQueue { [self] in
+            let rule = MockFailureRule(
+                id: nextFailureRuleID,
+                operation: operation,
+                deviceID: deviceID,
+                characteristicUUID: characteristicUUID?.uppercased(),
+                behavior: behavior,
+                remaining: count
+            )
+            nextFailureRuleID += 1
+            failureRules.append(rule)
+            DispatchQueue.main.async { completion(rule) }
+        }
+    }
+
+    /// Removes one rule, or all of them when `id` is nil. Reports how many went.
+    func clearFailures(id: Int?, completion: @escaping (Int) -> Void) {
+        transport.performOnIOQueue { [self] in
+            let before = failureRules.count
+            failureRules.removeAll { id == nil || $0.id == id }
+            let removed = before - failureRules.count
+            DispatchQueue.main.async { completion(removed) }
+        }
+    }
+
+    func failures(completion: @escaping ([MockFailureRule]) -> Void) {
+        transport.performOnIOQueue { [self] in
+            let rules = failureRules
+            DispatchQueue.main.async { completion(rules) }
+        }
+    }
+
+    func activity(after sequence: Int, limit: Int,
+                  completion: @escaping (_ events: [MockActivityEvent], _ last: Int, _ state: LiveState) -> Void) {
+        transport.performOnIOQueue { [self] in
+            let events = activityLog.events(after: sequence, limit: limit)
+            let last = activityLog.lastSequence
+            let subscriptions = notifyingCharacteristics.sorted().compactMap { wireID -> (String, String, String)? in
+                let parts = wireID.split(separator: ":").map(String.init)
+                guard parts.count >= 5 else { return nil }
+                return (parts[0], parts[1], parts[3])
+            }
+            let state = LiveState(
+                isMockServing: serveMode == .mock && transport.isRunning,
+                connectedDeviceIDs: connectedPeripherals.sorted(),
+                subscriptions: subscriptions
+            )
+            DispatchQueue.main.async { completion(events, last, state) }
+        }
+    }
+
+    func clearActivity(completion: @escaping () -> Void) {
+        transport.performOnIOQueue { [self] in
+            activityLog.clear()
+            DispatchQueue.main.async(execute: completion)
         }
     }
 }

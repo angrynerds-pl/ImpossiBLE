@@ -51,5 +51,13 @@ let package = Package(
             name: "impossible-mcp",
             path: "MCPShim"
         ),
+        .testTarget(
+            name: "ImpossiBLEProviderKitTests",
+            dependencies: [
+                "ImpossiBLEProviderKit",
+                .product(name: "SimBridgeShell", package: "SimBridgeKit"),
+            ],
+            path: "Tests/ImpossiBLEProviderKitTests"
+        ),
     ]
 )
