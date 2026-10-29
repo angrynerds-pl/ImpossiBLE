@@ -604,6 +604,14 @@ public struct ImpossiBLESection: View {
     // MARK: - Passthrough Body
 
     private var passthroughBody: some View {
+        VStack(spacing: 0) {
+            PM5RemotePanel(remote: server.pm5Remote)
+            passthroughActivityList
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var passthroughActivityList: some View {
         Group {
             if activity.devices.isEmpty {
                 passthroughPlaceholder(

@@ -594,6 +594,113 @@ final class ProviderTools {
             run: sync { tools, args in try tools.exportConfiguration(args) }
         ),
 
+        // MARK: PM5 remote (passthrough)
+        ToolDefinition(
+            name: "pm5_status",
+            description: """
+                Passthrough: whether the PM5 remote is on, and the Concept2 PM5s the simulator app is connected \
+                to. A PM5 is ready once the app has subscribed to its CSAFE responses.
+                """,
+            inputSchema: schema(),
+            readOnly: true,
+            destructive: false,
+            run: sync { tools, _ in tools.pm5Status() }
+        ),
+        ToolDefinition(
+            name: "pm5_set_remote_enabled",
+            description: "Turn the PM5 remote on or off (same as the switch in the panel). Off by default.",
+            inputSchema: schema(["enabled": ["type": "boolean"]], required: ["enabled"]),
+            readOnly: false,
+            destructive: false,
+            run: sync { tools, args in
+                tools.server.pm5Remote.setEnabled(try ControlDTO.bool(args["enabled"] as Any, field: "enabled"))
+                return tools.pm5Status()
+            }
+        ),
+        ToolDefinition(
+            name: "pm5_press_key",
+            description: """
+                Passthrough, remote on: press a button on the real PM5 while the simulator app stays connected \
+                to it — the soft keys A–E (top to bottom beside the screen) or Units, Display, Menu. Sent as a \
+                CSAFE virtual-key command; the PM5's reply is kept from the app so it is not mistaken for one \
+                of its own.
+                """,
+            inputSchema: schema([
+                "key": ["type": "string", "enum": PM5Key.allCases.map(\.rawValue)],
+                "device": ["type": "string", "description": "PM5 id or name; only needed when several are connected"],
+            ], required: ["key"]),
+            readOnly: false,
+            destructive: false,
+            run: { tools, args, _, completion in
+                guard let raw = args["key"] as? String,
+                      let key = PM5Key.allCases.first(where: { $0.rawValue.caseInsensitiveCompare(raw) == .orderedSame })
+                else {
+                    completion(.failure(ToolError("key must be one of: \(PM5Key.allCases.map(\.rawValue).joined(separator: ", "))")))
+                    return
+                }
+                tools.server.pm5Remote.press(key, deviceID: args["device"] as? String) { result in
+                    completion(result.map { ProviderTools.pm5Result("key \(key.title)", $0) })
+                }
+            }
+        ),
+        ToolDefinition(
+            name: "pm5_screen_command",
+            description: """
+                Passthrough, remote on: a workout-screen action on the real PM5 — prepareToWorkout, \
+                terminateWorkout (ends the current workout), rearmWorkout, goToMainScreen.
+                """,
+            inputSchema: schema([
+                "command": ["type": "string", "enum": PM5ScreenCommand.allCases.map(\.rawValue)],
+                "device": ["type": "string", "description": "PM5 id or name; only needed when several are connected"],
+            ], required: ["command"]),
+            readOnly: false,
+            destructive: true,
+            run: { tools, args, _, completion in
+                guard let raw = args["command"] as? String, let command = PM5ScreenCommand(rawValue: raw) else {
+                    completion(.failure(ToolError("command must be one of: \(PM5ScreenCommand.allCases.map(\.rawValue).joined(separator: ", "))")))
+                    return
+                }
+                tools.server.pm5Remote.send(command, deviceID: args["device"] as? String) { result in
+                    completion(result.map { ProviderTools.pm5Result(command.rawValue, $0) })
+                }
+            }
+        ),
+        ToolDefinition(
+            name: "pm5_send_csafe",
+            description: """
+                Passthrough, remote on: send any CSAFE command to the real PM5. payload is the unframed command \
+                as hex (e.g. "7E0186" wraps GETPMCFG get-screen-state-status in 0x7E); ImpossiBLE adds the \
+                frame, checksum and byte stuffing. Returns the PM5's reply (status byte first). With \
+                awaitResponse false the reply goes to the app instead — only do that for commands the app \
+                expects answers to, as it acts on every CSAFE reply it gets.
+                """,
+            inputSchema: schema([
+                "payload": ["type": "string", "description": "Unframed CSAFE command bytes as hex"],
+                "awaitResponse": ["type": "boolean", "description": "Wait for the reply and keep it from the app (default true)"],
+                "device": ["type": "string", "description": "PM5 id or name; only needed when several are connected"],
+            ], required: ["payload"]),
+            readOnly: false,
+            destructive: true,
+            run: { tools, args, _, completion in
+                let payload: [UInt8]
+                do {
+                    guard let data = try ControlDTO.optionalHex(args["payload"], field: "payload"), !data.isEmpty else {
+                        throw ToolError("payload must not be empty")
+                    }
+                    payload = [UInt8](data)
+                } catch {
+                    completion(.failure(error as? ToolError ?? ToolError("\(error)")))
+                    return
+                }
+                let awaitResponse = args["awaitResponse"] as? Bool ?? true
+                tools.server.pm5Remote.submit(payload: payload, label: "CSAFE \(ControlDTO.hex(Data(payload)))",
+                                              deviceID: args["device"] as? String,
+                                              swallowResponse: awaitResponse) { result in
+                    completion(result.map { ProviderTools.pm5Result("CSAFE \(ControlDTO.hex(Data(payload)))", $0) })
+                }
+            }
+        ),
+
         // MARK: Passthrough
         ToolDefinition(
             name: "passthrough_activity",
@@ -1120,6 +1227,34 @@ final class ProviderTools {
             throw ToolError("Writing \(path) failed: \(error.localizedDescription)")
         }
         return ["configuration": config.name, "path": path, "bytes": data.count]
+    }
+
+    // MARK: - PM5 remote
+
+    private func pm5Status() -> [String: Any] {
+        let remote = server.pm5Remote
+        var json: [String: Any] = [
+            "remoteEnabled": remote.isEnabled,
+            "mode": modeController.mode.rawValue,
+            "pm5s": remote.connections.map { ["id": $0.id, "name": $0.name, "ready": $0.isReady] as [String: Any] },
+        ]
+        if modeController.mode != .passthrough {
+            json["note"] = "The PM5 remote works in passthrough mode, with the simulator app connected to a real PM5."
+        } else if remote.connections.isEmpty {
+            json["note"] = "No PM5 connected yet; connect to it from the simulator app."
+        }
+        return json
+    }
+
+    fileprivate static func pm5Result(_ label: String, _ response: PM5Response?) -> [String: Any] {
+        var json: [String: Any] = ["sent": label]
+        if let response {
+            json["status"] = String(format: "%02X", response.status)
+            json["response"] = ControlDTO.hex(Data(response.content))
+        } else {
+            json["note"] = "Not awaited; the PM5's reply went to the app."
+        }
+        return json
     }
 
     // MARK: - Passthrough

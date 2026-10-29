@@ -80,6 +80,16 @@ Agents drive the provider through a tools-only MCP server. The MCP logic lives i
 
 Smoke test without an agent: pipe newline-delimited JSON-RPC (`initialize`, `tools/list`, `tools/call`) into `ImpossiBLE-Mac.app/Contents/Helpers/impossible-mcp`.
 
+### PM5 remote
+
+`PM5Remote` (main-thread model, `MockServer.pm5Remote`) and `PM5RemoteEngine` (`ProviderKit/Server/PM5Remote.swift`) inject CSAFE frames into the simulator app's live passthrough connection to a Concept2 PM5. The engine sits in `MockServer`'s passthrough path on the I/O queue: `appMessage` sees app → bridge, `bridgeMessage` sees bridge → app, and either can hold or consume a message.
+
+- **ErgData has no CSAFE request/response matching** — it acts on any reply on `CE060022` by content (a stray set-screen-state ack can re-trigger its terminate logic). So while an injected command is in flight the engine holds the app's writes to `CE060021`, consumes its own write confirmations and the reply whose first command byte matches the payload, and forwards any other reply to the app.
+- It only starts when the app is between commands: not mid-frame (last chunk lacked `F2`), and not awaiting a reply (unless that is older than 1.5 s); after 2 s of waiting it goes ahead.
+- Frames copy ErgData's `formatCsafeFrame`: extended `F0 FD 00 … cks F2`, XOR checksum of the payload, `F0…F3` stuffed. Button presses are SETPMCFG (`0x76`) set-screen-state (`0x13`) workout-screen virtual keys 47–54.
+- A PM5 is recognised from the discovered characteristic UUIDs, and *ready* only once the app subscribed to `CE060022`; the engine never subscribes itself, since the app would then see a notification-state change it did not ask for.
+- Off by default (`PM5RemoteEnabled`); `MockServer.tearDownClientState` resets the engine with the bridge.
+
 ## Forwarding vs Mocking
 
 The iOS app does not switch modes directly. It always talks to `/tmp/impossible.sock`; the Mac app's selected mode determines behavior.
