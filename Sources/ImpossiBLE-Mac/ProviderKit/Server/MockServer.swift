@@ -192,6 +192,12 @@ public final class MockServer: ObservableObject {
         pm5Engine = engine
         remote.submitToEngine = { injection in transport.performOnIOQueue { engine.submit(injection) } }
         remote.setEngineEnabled = { enabled in transport.performOnIOQueue { engine.setEnabled(enabled) } }
+        remote.fetchTrace = { since, completion in
+            transport.performOnIOQueue {
+                let entries = engine.trace(after: since)
+                DispatchQueue.main.async { completion(entries) }
+            }
+        }
     }
 
     private func clearPassthroughActivity() {

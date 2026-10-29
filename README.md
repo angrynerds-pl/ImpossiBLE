@@ -58,6 +58,7 @@ An app can also **bring its own mock configuration** instead of relying on the m
 - Auto-reconnect when the provider starts after the app
 - Automatic activation — no setup code required; the provider connection is opened lazily on the first `CBCentralManager` instantiation
 - Client-supplied mock configurations, so tests can carry their own virtual peripherals
+- Local MCP server so AI agents can switch modes, manage and record mock configurations, drive and inspect the app under test, and remote-control a Concept2 PM5 — see [Agent Control (MCP)](#agent-control-mcp)
 
 ## Requirements
 
@@ -158,27 +159,240 @@ When you save a capture, ImpossiBLE performs a deeper inspection for selected co
 
 ## Agent Control (MCP)
 
-AI agents such as Claude Code can drive ImpossiBLE through a local [MCP](https://modelcontextprotocol.io) server: switch between **Off / Mock / Passthrough**, list, select, create, rename, duplicate, delete, and export mock configurations, edit the devices being served, record real devices with a capture (including the deep GATT inspection), and watch passthrough traffic.
+AI agents such as Claude Code can drive ImpossiBLE through a local [MCP](https://modelcontextprotocol.io) server. Anything you can do in the menu bar panel, an agent can do too — plus a few things the panel cannot:
 
-In mock mode an agent can also run a test against your app end to end:
+- switch between **Off / Mock / Passthrough**;
+- manage mock configurations: list, select, create (import), save, rename, duplicate, delete, export;
+- edit the devices being served;
+- record real devices with a capture, including the deep GATT inspection;
+- in **Mock** mode, drive the app under test (live values, notifications, disconnects, injected failures) and check what it did (an activity log of every request, with the bytes read and written);
+- in **Passthrough** mode, watch real traffic and — with a Concept2 PM5 — press its buttons and read its state while the app stays connected.
 
-- **Drive it** — `set_characteristic_value` changes a value live and notifies the app when it has subscribed (stream sensor readings), `disconnect_device` drops a link, and `inject_failure` makes the next connect, discovery, read, write, subscribe, or RSSI request fail with an error (reads and writes carry a `CBATTError` code) or never answer.
-- **Check it** — `mock_activity` lists what the app did, oldest first: scans, connects, discovery, reads with the value returned, writes with the bytes written, subscriptions, and every injected failure that fired. Poll with `since` to get only new events.
-- **Keep it** — `export_configuration` writes a configuration in the format `ImpossiBLESetMockConfiguration()` takes, so a scenario an agent built becomes a fixture for your own tests.
+### How it works
+
+```
+┌──────────────┐  stdio (MCP)  ┌───────────────┐  /tmp/impossible-control.sock  ┌──────────────────┐  /tmp/impossible.sock  ┌───────────────┐
+│ Agent        │ ────────────▶ │ impossible-mcp│ ─────────────────────────────▶ │ ImpossiBLE-Mac   │ ◀───────────────────── │ App in the    │
+│ (Claude Code)│ ◀──────────── │ (shim)        │ ◀───────────────────────────── │ (menu bar app)   │ ─────────────────────▶ │ iOS Simulator │
+└──────────────┘               └───────────────┘                                └──────────────────┘                        └───────────────┘
+```
+
+- **`impossible-mcp`** is the MCP server your agent launches (stdio transport). It is bundled inside the app at `ImpossiBLE-Mac.app/Contents/Helpers/impossible-mcp`, and `make install` links it to `~/.local/bin/impossible-mcp`. It only passes messages through to the running menu bar app.
+- **The menu bar app does the work**: it owns the provider, the mock configurations, and the Bluetooth hardware, so the panel and the agent always see the same state. Whatever an agent changes shows up in the panel immediately.
+- **If the app is not running**, the shim launches it and waits up to 15 s. If the app quits or is relaunched mid-session, the shim reconnects on the next call; a call that was in flight at that moment gets an error and can simply be retried.
+- **A separate socket**, `/tmp/impossible-control.sock`, so agents can never take over the simulator app's connection on `/tmp/impossible.sock`. Several agents can be connected at once.
+- **Local only**: the socket is readable and writable only by your macOS user, and connections from other users are rejected.
+
+### Setup, step by step
+
+1. **Build and install the app** (once, and after updates):
+
+   ```bash
+   make install
+   ```
+
+   This installs `~/.local/bin/ImpossiBLE-Mac.app` and links `~/.local/bin/impossible-mcp`. For a development build, `make mac-relaunch` puts the shim at `./ImpossiBLE-Mac.app/Contents/Helpers/impossible-mcp` instead.
+
+2. **Start the app** (`make mac-run`, or open it from Finder). Starting it is optional — the shim launches it when needed — but the first launch asks for Bluetooth permission, which is easier to grant with the app in front of you.
+
+3. **Check that agent control is on.** In the panel footer, the **terminal** icon is highlighted when agents are allowed (the default). Click it to switch agent control off or on. A green dot on it means an agent is connected right now.
+
+4. **Register the server with your agent.**
+
+   *Claude Code* — available in every project:
+
+   ```bash
+   claude mcp add --scope user impossible -- ~/.local/bin/impossible-mcp
+   ```
+
+   or just for the current project: `claude mcp add impossible -- ~/.local/bin/impossible-mcp`.
+
+   *Other MCP clients* (Claude Desktop, Cursor, …) — add a stdio server to the client's MCP configuration, using the absolute path:
+
+   ```json
+   {
+     "mcpServers": {
+       "impossible": {
+         "command": "/Users/<you>/.local/bin/impossible-mcp"
+       }
+     }
+   }
+   ```
+
+5. **Verify.** Run `claude mcp list` (it should show `impossible … ✓ Connected`), or type `/mcp` inside a Claude Code session. Then ask the agent: *"What is the ImpossiBLE status?"* — it calls `get_status` and reports the mode, the connected simulator app, and the active configuration.
+
+6. **Run your app in the iOS Simulator** with the ImpossiBLE library linked (see [Quick Start](#quick-start)). From now on the agent can switch modes, serve devices, and watch what the app does.
+
+To check the server without an agent, pipe a request straight into the shim:
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_status","arguments":{}}}' \
+  | ~/.local/bin/impossible-mcp
+```
+
+### What you can ask for
+
+You talk to the agent in plain language; it picks the tools. For example:
+
+- *"Switch ImpossiBLE to mock and load the Heart Rate Monitor configuration."*
+- *"Record my PM5 as a mock configuration called PM5, with its full GATT database."*
+- *"Create a configuration with a thermometer advertising 181A whose 2A6E reads 23.4 °C."*
+- *"Stream heart rates from 70 to 150 bpm into the app, one per second."*
+- *"Make the next read of 2A19 fail with insufficient authentication, then check how the app handled it."*
+- *"Which commands did the app write to the device after I tapped Start?"*
+- *"Press Menu on the PM5 and tell me what screen it is on."*
+- *"Export the PM5 configuration to Tests/Fixtures/pm5.json."*
+
+### Tool reference
+
+Devices and configurations can be referred to by **id or name** (names match case-insensitively). Tools that only apply in one mode explain that in their result instead of failing silently.
+
+**Status and mode**
+
+| Tool | Arguments | What it does |
+|---|---|---|
+| `get_status` | — | Mode, provider socket state, connected simulator app (bundle id, pid, library version), active configuration, any configuration the app uploaded itself, capture state. Start here. |
+| `set_mode` | `mode`: `off` \| `mock` \| `passthrough` | Switches mode and waits until done. The simulator app sees Bluetooth turn off and on again and reconnects. Selecting the current mode does nothing. |
+
+**Mock configurations**
+
+| Tool | Arguments | What it does |
+|---|---|---|
+| `list_configurations` | — | Built-in and saved configurations; `active` marks the loaded one. |
+| `get_configuration` | `configuration` | Full contents: devices, services, characteristics, descriptors. |
+| `select_configuration` | `configuration` | Loads it into the working set (the devices served in mock mode). |
+| `create_configuration` | `name`, `devices[]`, `select`?, `replace`? | Creates a configuration from device definitions — also the way to import one. Loads it unless `select: false`. |
+| `save_working_set_as` | `name`, `replace`? | Saves the current working set, including edits. |
+| `rename_configuration` | `configuration`, `newName` | Built-in configurations cannot be renamed. |
+| `duplicate_configuration` | `configuration`, `newName`? | Copies any configuration, built-ins included. |
+| `delete_configuration` | `configuration` | Built-in configurations cannot be deleted. |
+| `export_configuration` | `configuration`, `path`?, `overwrite`? | JSON in the format `ImpossiBLESetMockConfiguration()` takes, returned as text or written to `path`. |
+
+**Working set** (the devices served in mock mode)
+
+| Tool | Arguments | What it does |
+|---|---|---|
+| `list_devices` | — | Devices with id, name, enabled, connectable, RSSI, advertised services. |
+| `get_device` | `device` | Full GATT definition. |
+| `add_device` | `device` | Adds a device; omitted fields get defaults. |
+| `update_device` | `device`, `changes` | Changes only the given fields; `services`, when given, replaces the whole GATT tree. |
+| `set_device_enabled` | `device`, `enabled` | Shows or hides a device from the app without deleting it. |
+| `duplicate_device` / `delete_device` | `device` | |
+
+Working-set edits are saved immediately but only change a stored configuration through `save_working_set_as`.
+
+**Recording real devices**
+
+| Tool | Arguments | What it does |
+|---|---|---|
+| `capture_start` | `advertisingService`? | Starts scanning with the Mac's Bluetooth, independent of the current mode. Wait a few seconds before reading results. |
+| `capture_results` | `onlyConnectable`?, `includeUnnamed`?, `nameContains`?, `advertisingService`?, `limit`? | Devices seen so far, most interesting first. Unnamed devices are hidden unless `includeUnnamed`. |
+| `capture_save` | `name`?, `deviceIds`? or filters, `inspect`?, `select`?, `replace`? | Saves the chosen devices as a configuration. With `inspect` (default) each connectable device is connected to and its services, characteristics, descriptors and readable values are read — several seconds per device, with progress updates. `inspect: false` saves advertisement data only, without connecting. |
+| `capture_stop` | — | Stops scanning; results stay available. |
+
+**Driving and checking the app (mock mode)**
+
+| Tool | Arguments | What it does |
+|---|---|---|
+| `set_characteristic_value` | `device`, `characteristic`, `service`?, `value` or `valueText`, `notify`? | Changes a value live. Sent as a notification if the app subscribed; every later read returns it. Lasts until the app disconnects (use `update_device` to change the stored value). |
+| `disconnect_device` | `device`, `error`? | Drops the app's connection as if the link was lost; the app gets `didDisconnectPeripheral` with an error. |
+| `inject_failure` | `device`, `operation`, `characteristic`?, `behavior`?, `error`?, `attError`?, `count`? | Makes the next request(s) fail. `operation`: `connect`, `discoverServices`, `discoverCharacteristics`, `read`, `write`, `readDescriptor`, `writeDescriptor`, `setNotify`, `readRSSI`. `behavior`: `error` (default; reads and writes carry a `CBATTError` code, default 14) or `noResponse` (never answers). `count` 0 keeps failing until cleared. |
+| `list_failures` / `clear_failures` | `id`? | Armed failures; clear one or all. |
+| `mock_activity` | `since`?, `limit`? | Everything the app did, oldest first: scans, connects, discovery, reads (with the value returned), writes (with the bytes written), subscriptions, values agents pushed, failures that fired — plus current connections and subscriptions. Pass the previous `lastSeq` as `since` to get only new events. |
+| `clear_mock_activity` | — | Empties the log, e.g. before the step you want to check. |
+
+**Passthrough**
+
+| Tool | Arguments | What it does |
+|---|---|---|
+| `passthrough_activity` | — | The real devices the app talks to and its latest GATT/L2CAP operation on each. |
+| `terminate_simulator_app` | — | Sends SIGTERM to the connected simulator app, e.g. to restart it with a clean Bluetooth state. |
+
+**PM5 remote** (passthrough, with the app connected to a Concept2 PM5 — see [PM5 Remote](#pm5-remote))
+
+| Tool | Arguments | What it does |
+|---|---|---|
+| `pm5_status` | — | Whether the remote is on, the connected PM5s and whether they are ready, and the last known state. |
+| `pm5_set_remote_enabled` | `enabled` | Same as the switch on the panel's PM5 Remote card. Off by default. |
+| `pm5_press_key` | `key`: `A`–`E`, `units`, `display`, `menu`; `device`? | Presses a PM5 button and returns the PM5's state just after. |
+| `pm5_get_state` | `device`? | Operational state, workout state, rowing state, workout and interval type, display type and units, battery, last screen command. |
+| `pm5_screen_command` | `command`: `prepareToWorkout` \| `terminateWorkout` \| `rearmWorkout` \| `goToMainScreen`; `device`? | Workout-screen actions. `terminateWorkout` ends the workout in progress. |
+| `pm5_send_csafe` | `payload` (hex), `awaitResponse`?, `writeWithoutResponse`?, `device`? | Any CSAFE command, unframed (ImpossiBLE adds framing, checksum, byte stuffing). Returns the PM5's reply. |
+| `pm5_trace` | `since`? | Recent CSAFE traffic on the PM5's command and response characteristics: what the app wrote, what the remote sent, and what happened to each reply (passed to the app or kept back). For debugging. |
+
+### Device format
+
+Tools that take or return devices use JSON that is easy to write by hand:
+
+```json
+{
+  "name": "Thermo",
+  "rssi": -55,
+  "isConnectable": true,
+  "advertisedServiceUUIDs": ["181A"],
+  "manufacturerData": "4C000215",
+  "pairingMode": "none",
+  "services": [
+    {
+      "uuid": "181A",
+      "characteristics": [
+        {
+          "uuid": "2A6E",
+          "properties": ["read", "notify"],
+          "value": "2409",
+          "descriptors": [{ "uuid": "2902", "value": "0000" }]
+        },
+        { "uuid": "2A29", "properties": ["read"], "valueText": "Acme" }
+      ]
+    }
+  ]
+}
+```
+
+- **Values** are hex (`"0A1B"`, `"0x0A1B"` and `"0a 1b"` all work), or UTF-8 text via `valueText`. Results include `valueText` whenever a value is readable text.
+- **properties**: `broadcast`, `read`, `writeWithoutResponse`, `write`, `notify`, `indicate`, `authenticatedSignedWrites`, `extendedProperties` — or the raw bitmask as a number.
+- **pairingMode**: `none`, `justWorks`, or `passkey` (with a six-digit `passkey`). **securityLevel** per characteristic: `none` or `encryptionRequired`.
+- A device returned by `get_device` can be sent back to `update_device` or `create_configuration` unchanged.
+
+### Workflows
+
+**Record a real device and use it as a mock**
+
+1. *"Record my PM5 as a configuration called PM5."* — the agent runs `capture_start`, `capture_results`, then `capture_save` with inspection. Keep the device awake and not connected to another app.
+2. *"Switch to mock and select PM5."* — `set_mode mock`, `select_configuration PM5`.
+3. The simulator app now finds the recorded device, with the same name, services, and readable values. A recording is a snapshot: live data such as notifications is not part of it, but the agent can push values with `set_characteristic_value`.
+
+**Test how an app handles a scenario**
+
+1. Load a configuration in mock mode and `clear_mock_activity`.
+2. Use the app (or let the agent drive it), pushing values with `set_characteristic_value` and arming failures with `inject_failure` / `disconnect_device` where needed.
+3. Read `mock_activity` to check what the app did: which characteristics it read, the exact bytes it wrote, what it subscribed to, and how it reacted to the failures.
+4. Keep the scenario: `export_configuration` with a `path` gives your own tests a fixture for `ImpossiBLESetMockConfiguration()`.
+
+**Press PM5 buttons while the app uses the erg**
+
+1. *"Switch to passthrough."* Connect the simulator app to the PM5.
+2. *"Turn the PM5 remote on and tell me what the PM5 shows."* — `pm5_set_remote_enabled`, `pm5_get_state`.
+3. *"Press Menu, then B."* — each `pm5_press_key` returns the state after the press.
+
+### Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| *"ImpossiBLE-Mac is not reachable at /tmp/impossible-control.sock"* | Agent control is switched off (terminal icon in the panel footer), or the app could not be launched. Switch it on, or start the app and check the shim's path. |
+| `claude mcp list` shows the server as failed | The path given to `claude mcp add` does not exist — re-run `make install`, or point it at `./ImpossiBLE-Mac.app/Contents/Helpers/impossible-mcp` for a dev build. |
+| `get_status` shows `simulatorApp: null` | No app is connected. Launch the app in the simulator. If an app was replaced by another connection (e.g. a second app), relaunch it — a replaced app stops reconnecting on its own. |
+| The app shows Bluetooth as off | The mode is **Off**, or the app is not connected (see above). |
+| Mock devices do not appear in the app | The mode is not **Mock**, the device is disabled (`set_device_enabled`), or the app uploaded its own configuration, which takes precedence (`get_status` shows `appSuppliedConfiguration`). |
+| Capture finds nothing | The Mac's Bluetooth permission was not granted yet (development builds ask again after each rebuild), or the device is off or connected elsewhere. |
+| One PM5 button press moves two screens | The PM5 was processing every command twice; `pm5_trace` shows each command answered twice, with the status byte alternating `81`/`01`. Seen once with a stale connection, and gone after restarting ImpossiBLE and reconnecting the app to the PM5. |
+| `pm5_*` tools say no PM5 is connected | The mode must be **Passthrough** and the simulator app connected to the PM5. A PM5 is *ready* only once the app has subscribed to its responses. |
 
 ### PM5 Remote
 
-When the simulator app is connected to a real Concept2 PM5 through **Passthrough**, a **PM5 Remote** card appears in the panel. Switch it on to press the PM5's buttons — soft keys **A–E**, **Units**, **Display**, **Menu** — from the Mac while the app stays connected. Agents get the same through `pm5_status`, `pm5_set_remote_enabled`, `pm5_press_key`, `pm5_screen_command` (terminate, rearm, main screen, …), and `pm5_send_csafe` for any CSAFE command.
+When the simulator app is connected to a real Concept2 PM5 through **Passthrough**, a **PM5 Remote** card appears in the panel. Switch it on to press the PM5's buttons — soft keys **A–E**, **Units**, **Display**, **Menu** — from the Mac while the app stays connected. The card also shows what the PM5 is doing — e.g. *Ready* in the menus, or *Workout · Workout row · Force velocity* while rowing — refreshed after each press. Agents get the same through `pm5_status`, `pm5_set_remote_enabled`, `pm5_press_key` (which returns the state after the press), `pm5_get_state`, `pm5_screen_command` (terminate, rearm, main screen, …), and `pm5_send_csafe` for any CSAFE command. The PM5 cannot report which menu page is shown, but its operational state, workout state, and display type together tell where it is.
 
 The commands travel over the app's own connection as CSAFE frames, framed exactly like ErgData's. Apps like ErgData act on every CSAFE reply they receive, so ImpossiBLE keeps the PM5's replies to its own commands away from the app, holds the app's commands back for the moment one is in flight, and only sends when the app is between commands. The remote is off by default.
-
-The MCP server is `impossible-mcp`, bundled inside the app; `make install` links it next to the app. Register it with your agent, e.g. for Claude Code:
-
-```bash
-claude mcp add impossible -- ~/.local/bin/impossible-mcp
-```
-
-It talks to the running menu bar app over `/tmp/impossible-control.sock` (accessible only to your user) and launches the app when it is not running. Agent control can be switched off with the terminal icon in the panel footer; a green dot on it means an agent is connected. Configurations an app uploads itself are reported to agents but never edited by them.
 
 ## Makefile Targets
 

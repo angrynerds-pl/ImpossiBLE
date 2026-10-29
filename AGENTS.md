@@ -88,7 +88,9 @@ Smoke test without an agent: pipe newline-delimited JSON-RPC (`initialize`, `too
 - It only starts when the app is between commands: not mid-frame (last chunk lacked `F2`), and not awaiting a reply (unless that is older than 1.5 s); after 2 s of waiting it goes ahead.
 - Frames copy ErgData's `formatCsafeFrame`: extended `F0 FD 00 … cks F2`, XOR checksum of the payload, `F0…F3` stuffed. Button presses are SETPMCFG (`0x76`) set-screen-state (`0x13`) workout-screen virtual keys 47–54.
 - A PM5 is recognised from the discovered characteristic UUIDs, and *ready* only once the app subscribed to `CE060022`; the engine never subscribes itself, since the app would then see a notification-state change it did not ask for.
+- After consuming a reply to its own command, the engine also consumes one identical reply (ignoring the status byte) within 0.3 s: a PM5 was seen answering — and executing — every command twice on one connection (status toggle `81` then `01`), which leaked the second copy to the app. The doubling itself went away after a provider restart and app reconnect; its cause is unknown. `pm5_trace` (engine ring buffer of command/response chunks with their disposition) is the tool to look with.
 - Off by default (`PM5RemoteEnabled`); `MockServer.tearDownClientState` resets the engine with the bridge.
+- `PM5State` is one GETPMCFG (`0x7E`) frame of single-byte queries (operational/workout/rowing state, workout and interval type, display type and units, battery) plus screen-state status (3 bytes); the reply is parsed as `cmd len data…`. Value names follow ErgData's PM model enums, display type/units the Concept2 CSAFE spec; unknown values keep their number. It is queried `settleDelay` (0.4 s) after a key press, since the PM acks before it redraws.
 
 ## Forwarding vs Mocking
 
