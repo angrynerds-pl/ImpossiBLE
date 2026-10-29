@@ -127,6 +127,146 @@ enum PM5Command {
     }
 }
 
+// MARK: - PM5 state
+
+/// What the PM5 reports about itself. It cannot say which menu page is shown,
+/// but operational state, workout state, and display type together tell where
+/// it is: main menu, set up and waiting, rowing on a given screen, finished.
+struct PM5State: Equatable {
+    struct Field: Equatable {
+        let raw: Int
+        let name: String?
+    }
+
+    let operationalState: Field?
+    let workoutState: Field?
+    let rowingState: Field?
+    let workoutType: Field?
+    let intervalType: Field?
+    let displayType: Field?
+    let displayUnits: Field?
+    let batteryPercent: Int?
+    /// The last screen command the PM received and how far it got.
+    let screenCommand: (type: Field, value: Int, status: Field)?
+
+    static func == (lhs: PM5State, rhs: PM5State) -> Bool {
+        lhs.summary == rhs.summary
+    }
+
+    /// One line for the panel, e.g. "Workout · rowing · Force curve".
+    var summary: String {
+        var parts: [String] = []
+        if let operationalState { parts.append(Self.title(operationalState)) }
+        if let workoutState, operationalState?.raw == 2 || operationalState?.raw == 3 {
+            parts.append(Self.title(workoutState))
+        }
+        if let displayType, operationalState?.raw == 2 { parts.append(Self.title(displayType)) }
+        return parts.joined(separator: " · ")
+    }
+
+    private static func title(_ field: Field) -> String {
+        guard let name = field.name else { return "#\(field.raw)" }
+        // camelCase → "Camel case"
+        var words = ""
+        for character in name {
+            if character.isUppercase, !words.isEmpty { words += " " }
+            words += words.isEmpty ? character.uppercased() : character.lowercased()
+        }
+        return words
+    }
+
+    // Value names follow ErgData's PM models (EDPMOperationalState,
+    // EDPMWorkoutState, EDPMWorkoutType, EDPMIntervalType, EDPMRowingState).
+    static let operationalStates = [
+        0: "reset", 1: "ready", 2: "workout", 3: "warmup", 4: "race", 5: "powerOff", 6: "pause",
+        7: "invokeBootloader", 8: "powerOffShip", 9: "idleCharge", 10: "idle", 11: "mfgTest",
+        12: "firmwareUpdate", 13: "dragFactor", 100: "dragFactorCalibration",
+    ]
+    static let workoutStates = [
+        0: "waitToBegin", 1: "workoutRow", 2: "countDownPause", 3: "intervalRest", 4: "intervalWorkoutTime",
+        5: "intervalWorkoutDistance", 6: "intervalRestEndToWorkoutTime", 7: "intervalRestEndToWorkoutDistance",
+        8: "intervalWorkoutTimeToRest", 9: "intervalWorkoutDistanceToRest", 10: "workoutEnd", 11: "terminate",
+        12: "workoutLogged", 13: "rearm",
+    ]
+    static let rowingStates = [0: "inactive", 1: "active"]
+    static let workoutTypes = [
+        0: "justRowNoSplits", 1: "justRowSplits", 2: "fixedDistanceNoSplits", 3: "fixedDistanceSplits",
+        4: "fixedTimeNoSplits", 5: "fixedTimeSplits", 6: "fixedTimeInterval", 7: "fixedDistanceInterval",
+        8: "variableInterval", 9: "variableUndefinedRestInterval", 10: "fixedCalorie", 11: "fixedWattMinutes",
+        12: "fixedCaloriesInterval", 13: "fixedWattMinutesInterval",
+    ]
+    static let intervalTypes = [
+        0: "time", 1: "distance", 2: "rest", 3: "timeRestUndefined", 4: "distanceRestUndefined",
+        5: "restUndefined", 6: "calories", 7: "caloriesRestUndefined", 8: "wattMinutes",
+        9: "wattMinutesRestUndefined", 255: "none",
+    ]
+    // Concept2 PM CSAFE spec DISPLAY_TYPE / DISPLAY_UNITS_TYPE.
+    static let displayTypes = [0: "standard", 1: "forceVelocity", 2: "paceBoat", 3: "perStroke", 4: "simple", 5: "target"]
+    static let displayUnits = [0: "timeMeters", 1: "pace", 2: "watts", 3: "caloricBurnRate", 4: "calories"]
+    static let screenTypes = [0: "none", 1: "workout", 2: "race", 3: "csafe", 4: "diag", 5: "mfg"]
+    static let screenStatuses = [0: "inactive", 1: "pending", 2: "inProgress"]
+
+    enum Query {
+        static let screenStateStatus: UInt8 = 0x86
+        static let workoutType: UInt8 = 0x89
+        static let displayType: UInt8 = 0x8A
+        static let displayUnits: UInt8 = 0x8B
+        static let workoutState: UInt8 = 0x8D
+        static let intervalType: UInt8 = 0x8E
+        static let operationalState: UInt8 = 0x8F
+        static let rowingState: UInt8 = 0x93
+        static let batteryPercent: UInt8 = 0x97
+
+        static let all: [UInt8] = [
+            operationalState, workoutState, rowingState, workoutType, intervalType,
+            displayType, displayUnits, batteryPercent, screenStateStatus,
+        ]
+    }
+
+    static let getConfigWrapper: UInt8 = 0x7E
+
+    /// One GETPMCFG frame asking for everything above.
+    static let queryPayload: [UInt8] = [getConfigWrapper, UInt8(Query.all.count)] + Query.all
+
+    /// Decodes the reply: status, 0x7E, length, then `cmd len data…` per query.
+    init?(response content: [UInt8]) {
+        guard content.count >= 3, content[1] == Self.getConfigWrapper else { return nil }
+        var values: [UInt8: [UInt8]] = [:]
+        var index = 3
+        let end = min(content.count, 3 + Int(content[2]))
+        while index + 1 < end {
+            let command = content[index]
+            let length = Int(content[index + 1])
+            guard index + 2 + length <= end else { return nil }
+            values[command] = Array(content[(index + 2)..<(index + 2 + length)])
+            index += 2 + length
+        }
+        guard !values.isEmpty else { return nil }
+
+        func field(_ query: UInt8, _ names: [Int: String]) -> Field? {
+            guard let byte = values[query]?.first else { return nil }
+            return Field(raw: Int(byte), name: names[Int(byte)])
+        }
+        operationalState = field(Query.operationalState, Self.operationalStates)
+        workoutState = field(Query.workoutState, Self.workoutStates)
+        rowingState = field(Query.rowingState, Self.rowingStates)
+        workoutType = field(Query.workoutType, Self.workoutTypes)
+        intervalType = field(Query.intervalType, Self.intervalTypes)
+        displayType = field(Query.displayType, Self.displayTypes)
+        displayUnits = field(Query.displayUnits, Self.displayUnits)
+        batteryPercent = values[Query.batteryPercent]?.first.map(Int.init)
+        if let screen = values[Query.screenStateStatus], screen.count >= 3 {
+            screenCommand = (
+                type: Field(raw: Int(screen[0]), name: Self.screenTypes[Int(screen[0])]),
+                value: Int(screen[1]),
+                status: Field(raw: Int(screen[2]), name: Self.screenStatuses[Int(screen[2])])
+            )
+        } else {
+            screenCommand = nil
+        }
+    }
+}
+
 // MARK: - Model shared with the UI and MCP
 
 public struct PM5Connection: Identifiable, Equatable {
@@ -165,6 +305,12 @@ public final class PM5Remote: ObservableObject {
     @Published public private(set) var connections: [PM5Connection] = []
     @Published public private(set) var lastResult = ""
     @Published public private(set) var pendingCount = 0
+    /// The PM's last reported state, refreshed after every key press.
+    @Published private(set) var state: PM5State?
+
+    /// The PM redraws after acknowledging a screen command; asking right away
+    /// would often report the screen it is leaving.
+    static let settleDelay: TimeInterval = 0.4
 
     /// Wired by `MockServer` to hand work to the engine on its I/O queue.
     var submitToEngine: ((PM5Injection) -> Void)?
@@ -180,12 +326,39 @@ public final class PM5Remote: ObservableObject {
         UserDefaults.standard.set(enabled, forKey: Self.enabledKey)
         setEngineEnabled?(enabled)
         lastResult = enabled ? "Remote on" : "Remote off"
+        if enabled && connections.contains(where: \.isReady) {
+            queryState()
+        }
     }
 
     func press(_ key: PM5Key, deviceID: String? = nil,
                completion: ((Result<PM5Response?, ToolError>) -> Void)? = nil) {
         submit(payload: PM5Command.screenState(key.screenValue), label: "Key \(key.title)",
-               deviceID: deviceID, swallowResponse: true, completion: completion)
+               deviceID: deviceID, swallowResponse: true) { [weak self] result in
+            if case .success = result {
+                DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay) {
+                    self?.queryState(deviceID: deviceID)
+                }
+            }
+            completion?(result)
+        }
+    }
+
+    /// Asks the PM what it is doing; the result is also published as `state`.
+    func queryState(deviceID: String? = nil, completion: ((Result<PM5State, ToolError>) -> Void)? = nil) {
+        submit(payload: PM5State.queryPayload, label: "State", deviceID: deviceID,
+               swallowResponse: true, quiet: true) { [weak self] result in
+            let decoded = result.flatMap { response -> Result<PM5State, ToolError> in
+                guard let response, let state = PM5State(response: response.content) else {
+                    return .failure(ToolError("The PM5's state reply could not be decoded"))
+                }
+                return .success(state)
+            }
+            if case .success(let state) = decoded {
+                self?.state = state
+            }
+            completion?(decoded)
+        }
     }
 
     func send(_ command: PM5ScreenCommand, deviceID: String? = nil,
@@ -194,7 +367,8 @@ public final class PM5Remote: ObservableObject {
                deviceID: deviceID, swallowResponse: true, completion: completion)
     }
 
-    func submit(payload: [UInt8], label: String, deviceID: String?, swallowResponse: Bool,
+    /// `quiet` keeps routine queries out of the panel's last-result line.
+    func submit(payload: [UInt8], label: String, deviceID: String?, swallowResponse: Bool, quiet: Bool = false,
                 completion: ((Result<PM5Response?, ToolError>) -> Void)?) {
         guard isEnabled else {
             completion?(.failure(ToolError("The PM5 remote is off; turn it on in the panel or with pm5_set_remote_enabled")))
@@ -210,8 +384,9 @@ public final class PM5Remote: ObservableObject {
             guard let self else { return }
             pendingCount -= 1
             switch result {
-                case .success: lastResult = "\(label): sent"
+                case .success where !quiet: lastResult = "\(label): sent"
                 case .failure(let error): lastResult = "\(label): \(error.message)"
+                default: break
             }
             completion?(result)
         })
@@ -219,7 +394,13 @@ public final class PM5Remote: ObservableObject {
 
     func publish(_ connections: [PM5Connection]) {
         if connections != self.connections {
+            let becameReady = connections.contains(where: \.isReady) && !self.connections.contains(where: \.isReady)
             self.connections = connections
+            if connections.isEmpty {
+                state = nil
+            } else if becameReady && isEnabled {
+                queryState()
+            }
         }
     }
 }

@@ -168,6 +168,32 @@ enum ControlDTO {
         return json
     }
 
+    static func pm5State(_ state: PM5State) -> [String: Any] {
+        func field(_ field: PM5State.Field?) -> Any {
+            guard let field else { return NSNull() }
+            return field.name ?? "unknown(\(field.raw))"
+        }
+        var json: [String: Any] = [
+            "summary": state.summary,
+            "operationalState": field(state.operationalState),
+            "workoutState": field(state.workoutState),
+            "rowingState": field(state.rowingState),
+            "workoutType": field(state.workoutType),
+            "intervalType": field(state.intervalType),
+            "displayType": field(state.displayType),
+            "displayUnits": field(state.displayUnits),
+            "batteryPercent": state.batteryPercent.map { $0 as Any } ?? NSNull(),
+        ]
+        if let screen = state.screenCommand {
+            json["lastScreenCommand"] = [
+                "screenType": field(screen.type),
+                "value": screen.value,
+                "status": field(screen.status),
+            ]
+        }
+        return json
+    }
+
     private static func addValue(_ value: Data?, to json: inout [String: Any]) {
         guard let value else { return }
         json["value"] = hex(value)

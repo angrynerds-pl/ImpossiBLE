@@ -623,7 +623,8 @@ final class ProviderTools {
                 Passthrough, remote on: press a button on the real PM5 while the simulator app stays connected \
                 to it — the soft keys A–E (top to bottom beside the screen) or Units, Display, Menu. Sent as a \
                 CSAFE virtual-key command; the PM5's reply is kept from the app so it is not mistaken for one \
-                of its own.
+                of its own. Returns the PM5's state shortly after the press (see pm5_get_state), so you can see \
+                what the key did.
                 """,
             inputSchema: schema([
                 "key": ["type": "string", "enum": PM5Key.allCases.map(\.rawValue)],
@@ -638,8 +639,44 @@ final class ProviderTools {
                     completion(.failure(ToolError("key must be one of: \(PM5Key.allCases.map(\.rawValue).joined(separator: ", "))")))
                     return
                 }
-                tools.server.pm5Remote.press(key, deviceID: args["device"] as? String) { result in
-                    completion(result.map { ProviderTools.pm5Result("key \(key.title)", $0) })
+                let remote = tools.server.pm5Remote
+                let device = args["device"] as? String
+                remote.press(key, deviceID: device) { result in
+                    guard case .success(let response) = result else {
+                        completion(result.map { ProviderTools.pm5Result("key \(key.title)", $0) })
+                        return
+                    }
+                    var json = ProviderTools.pm5Result("key \(key.title)", response)
+                    DispatchQueue.main.asyncAfter(deadline: .now() + PM5Remote.settleDelay) {
+                        remote.queryState(deviceID: device) { state in
+                            switch state {
+                                case .success(let state): json["stateAfter"] = ControlDTO.pm5State(state)
+                                case .failure(let error): json["stateAfter"] = "unavailable: \(error.message)"
+                            }
+                            completion(.success(json))
+                        }
+                    }
+                }
+            }
+        ),
+        ToolDefinition(
+            name: "pm5_get_state",
+            description: """
+                Passthrough, remote on: ask the real PM5 what it is doing. The PM5 cannot report the exact menu \
+                page, but these together tell where it is — operationalState (ready = menus, workout, race, \
+                firmwareUpdate, …), workoutState (waitToBegin, workoutRow, intervalRest, workoutEnd, …), \
+                rowingState, workoutType, intervalType, displayType (which data screen) and displayUnits, \
+                batteryPercent, and lastScreenCommand (the last screen command it received and whether it \
+                finished). The query's reply is kept from the app.
+                """,
+            inputSchema: schema([
+                "device": ["type": "string", "description": "PM5 id or name; only needed when several are connected"],
+            ]),
+            readOnly: true,
+            destructive: false,
+            run: { tools, args, _, completion in
+                tools.server.pm5Remote.queryState(deviceID: args["device"] as? String) { result in
+                    completion(result.map { ControlDTO.pm5State($0) })
                 }
             }
         ),
@@ -1237,6 +1274,7 @@ final class ProviderTools {
             "remoteEnabled": remote.isEnabled,
             "mode": modeController.mode.rawValue,
             "pm5s": remote.connections.map { ["id": $0.id, "name": $0.name, "ready": $0.isReady] as [String: Any] },
+            "lastKnownState": remote.state.map { ControlDTO.pm5State($0) as Any } ?? NSNull(),
         ]
         if modeController.mode != .passthrough {
             json["note"] = "The PM5 remote works in passthrough mode, with the simulator app connected to a real PM5."

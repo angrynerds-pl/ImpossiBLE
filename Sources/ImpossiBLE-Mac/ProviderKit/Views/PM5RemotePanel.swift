@@ -14,6 +14,7 @@ struct PM5RemotePanel: View {
                 header(connection)
                 if remote.isEnabled {
                     if connection.isReady {
+                        stateLine(connection)
                         buttons(connection)
                     } else {
                         Text("Waiting for the app to subscribe to PM5 responses…")
@@ -60,6 +61,24 @@ struct PM5RemotePanel: View {
                 .toggleStyle(.switch)
                 .controlSize(.mini)
                 .help("Send button presses to the PM5 alongside the connected app")
+        }
+    }
+
+    private func stateLine(_ connection: PM5Connection) -> some View {
+        HStack(spacing: 6) {
+            Text(remote.state.map { $0.summary.isEmpty ? "Unknown state" : $0.summary } ?? "State not read yet")
+                .font(.caption)
+                .foregroundStyle(remote.state == nil ? .secondary : .primary)
+                .lineLimit(1)
+            Spacer()
+            Button {
+                remote.queryState(deviceID: connection.id)
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .help("Ask the PM5 for its current state")
         }
     }
 

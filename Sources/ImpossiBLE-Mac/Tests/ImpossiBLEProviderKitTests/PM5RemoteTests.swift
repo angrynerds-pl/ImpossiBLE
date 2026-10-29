@@ -201,3 +201,49 @@ final class PM5RemoteEngineTests: XCTestCase {
         XCTAssertTrue(published.isEmpty)
     }
 }
+
+final class PM5StateTests: XCTestCase {
+    func testQueryIsOneGetConfigFrame() {
+        XCTAssertEqual(PM5State.queryPayload, [0x7E, 0x09, 0x8F, 0x8D, 0x93, 0x89, 0x8E, 0x8A, 0x8B, 0x97, 0x86])
+    }
+
+    func testDecodesEachReportedField() throws {
+        let replies: [UInt8] = [
+            0x8F, 0x01, 0x02,             // operational: workout
+            0x8D, 0x01, 0x01,             // workout state: workoutRow
+            0x93, 0x01, 0x01,             // rowing: active
+            0x89, 0x01, 0x05,             // fixedTimeSplits
+            0x8E, 0x01, 0xFF,             // interval: none
+            0x8A, 0x01, 0x01,             // display: forceVelocity
+            0x8B, 0x01, 0x01,             // units: pace
+            0x97, 0x01, 0x55,             // battery 85 %
+            0x86, 0x03, 0x01, 0x2F, 0x00, // last screen command: workout / key A / inactive
+        ]
+        let state = try XCTUnwrap(PM5State(response: [0x81, 0x7E, UInt8(replies.count)] + replies))
+
+        XCTAssertEqual(state.operationalState?.name, "workout")
+        XCTAssertEqual(state.workoutState?.name, "workoutRow")
+        XCTAssertEqual(state.rowingState?.name, "active")
+        XCTAssertEqual(state.workoutType?.name, "fixedTimeSplits")
+        XCTAssertEqual(state.intervalType?.name, "none")
+        XCTAssertEqual(state.displayType?.name, "forceVelocity")
+        XCTAssertEqual(state.displayUnits?.name, "pace")
+        XCTAssertEqual(state.batteryPercent, 85)
+        XCTAssertEqual(state.screenCommand?.value, 47)
+        XCTAssertEqual(state.screenCommand?.status.name, "inactive")
+        XCTAssertEqual(state.summary, "Workout · Workout row · Force velocity")
+    }
+
+    func testMenusSummarizeAsReadyAndUnknownValuesKeepTheirNumber() throws {
+        let state = try XCTUnwrap(PM5State(response: [0x81, 0x7E, 0x06, 0x8F, 0x01, 0x01, 0x8D, 0x01, 0x63]))
+        XCTAssertEqual(state.summary, "Ready")
+        XCTAssertEqual(state.workoutState?.raw, 99)
+        XCTAssertNil(state.workoutState?.name)
+        XCTAssertNil(state.displayType)
+    }
+
+    func testRejectsOtherRepliesAndTruncatedData() {
+        XCTAssertNil(PM5State(response: [0x81, 0x76, 0x01, 0x13]))
+        XCTAssertNil(PM5State(response: [0x81, 0x7E, 0x04, 0x8F, 0x05, 0x01, 0x02]))
+    }
+}

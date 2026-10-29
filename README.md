@@ -168,7 +168,7 @@ In mock mode an agent can also run a test against your app end to end:
 
 ### PM5 Remote
 
-When the simulator app is connected to a real Concept2 PM5 through **Passthrough**, a **PM5 Remote** card appears in the panel. Switch it on to press the PM5's buttons — soft keys **A–E**, **Units**, **Display**, **Menu** — from the Mac while the app stays connected. Agents get the same through `pm5_status`, `pm5_set_remote_enabled`, `pm5_press_key`, `pm5_screen_command` (terminate, rearm, main screen, …), and `pm5_send_csafe` for any CSAFE command.
+When the simulator app is connected to a real Concept2 PM5 through **Passthrough**, a **PM5 Remote** card appears in the panel. Switch it on to press the PM5's buttons — soft keys **A–E**, **Units**, **Display**, **Menu** — from the Mac while the app stays connected. The card also shows what the PM5 is doing — e.g. *Ready* in the menus, or *Workout · Workout row · Force velocity* while rowing — refreshed after each press. Agents get the same through `pm5_status`, `pm5_set_remote_enabled`, `pm5_press_key` (which returns the state after the press), `pm5_get_state`, `pm5_screen_command` (terminate, rearm, main screen, …), and `pm5_send_csafe` for any CSAFE command. The PM5 cannot report which menu page is shown, but its operational state, workout state, and display type together tell where it is.
 
 The commands travel over the app's own connection as CSAFE frames, framed exactly like ErgData's. Apps like ErgData act on every CSAFE reply they receive, so ImpossiBLE keeps the PM5's replies to its own commands away from the app, holds the app's commands back for the moment one is in flight, and only sends when the app is between commands. The remote is off by default.
 
