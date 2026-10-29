@@ -42,6 +42,9 @@ public final class MockServer: ObservableObject {
 
     public weak var store: MockStore?
     public let passthroughActivity = PassthroughActivityMonitor()
+    /// Button presses and CSAFE commands into a PM5 the app is connected to
+    /// through Passthrough.
+    public let pm5Remote = PM5Remote()
 
     // Guarded by the transport's I/O queue
     private var serveMode: ServeMode = .mock
@@ -65,6 +68,8 @@ public final class MockServer: ObservableObject {
     /// Failures armed by agents, consumed by matching requests.
     private var failureRules: [MockFailureRule] = []
     private var nextFailureRuleID = 1
+    /// Sits in the passthrough path between the app and the bridge.
+    private var pm5Engine: PM5RemoteEngine!
     /// Created on first Passthrough start and kept for the process lifetime;
     /// instantiating it triggers the one-time macOS Bluetooth consent prompt.
     private var passthroughBridge: CBSPassthroughBridge?
@@ -80,6 +85,7 @@ public final class MockServer: ObservableObject {
         transport.onMessage = { [weak self] message in
             self?.handleMessage(message)
         }
+        configurePM5Remote()
         transport.onClientConnected = { [weak self] client in
             self?.handleClientConnected(client)
         }
@@ -142,6 +148,7 @@ public final class MockServer: ObservableObject {
         scanActive = false
         clearClientSuppliedConfiguration()
         passthroughBridge?.reset()
+        pm5Engine.reset()
         clearPassthroughActivity()
         publishDeviceState()
     }
@@ -153,6 +160,7 @@ public final class MockServer: ObservableObject {
             guard let self else { return }
             self.transport.performOnIOQueue {
                 guard self.serveMode == .passthrough else { return }
+                if self.pm5Engine.bridgeMessage(message) { return }
                 self.transport.send(message)
             }
         }
@@ -164,6 +172,26 @@ public final class MockServer: ObservableObject {
             self.transport.note("\(name.isEmpty ? peripheralId.prefix(8) : Substring(name)): \(operation)")
         }
         passthroughBridge = bridge
+    }
+
+    private func configurePM5Remote() {
+        let transport = transport
+        let remote = pm5Remote
+        let engine = PM5RemoteEngine(
+            sendToBridge: { [weak self] message in self?.passthroughBridge?.handleMessage(message) },
+            sendToApp: { transport.send($0) },
+            schedule: { delay, work in
+                DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
+                    transport.performOnIOQueue(work)
+                }
+            },
+            publish: { connections in DispatchQueue.main.async { remote.publish(connections) } },
+            note: { transport.note($0) }
+        )
+        engine.isEnabled = remote.isEnabled
+        pm5Engine = engine
+        remote.submitToEngine = { injection in transport.performOnIOQueue { engine.submit(injection) } }
+        remote.setEngineEnabled = { enabled in transport.performOnIOQueue { engine.setEnabled(enabled) } }
     }
 
     private func clearPassthroughActivity() {
@@ -178,6 +206,7 @@ public final class MockServer: ObservableObject {
         guard let type = msg["type"] as? String else { return }
 
         if serveMode == .passthrough {
+            if pm5Engine.appMessage(msg) { return }
             passthroughBridge?.handleMessage(msg)
             return
         }

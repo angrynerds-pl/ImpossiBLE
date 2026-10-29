@@ -124,6 +124,8 @@ final class MCPSession {
         is served instead and cannot be edited here. To test an app in mock mode: drive it with \
         set_characteristic_value (live values and notifications), disconnect_device, and inject_failure, \
         and check what it did with mock_activity (reads, writes with their bytes, subscriptions). \
-        export_configuration turns a configuration into a fixture for ImpossiBLESetMockConfiguration().
+        export_configuration turns a configuration into a fixture for ImpossiBLESetMockConfiguration(). In \
+        passthrough with the app connected to a Concept2 PM5, the pm5_ tools press its buttons and send CSAFE \
+        commands over the same connection once the PM5 remote is on.
         """
 }

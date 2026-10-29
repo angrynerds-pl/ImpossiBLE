@@ -166,6 +166,12 @@ In mock mode an agent can also run a test against your app end to end:
 - **Check it** — `mock_activity` lists what the app did, oldest first: scans, connects, discovery, reads with the value returned, writes with the bytes written, subscriptions, and every injected failure that fired. Poll with `since` to get only new events.
 - **Keep it** — `export_configuration` writes a configuration in the format `ImpossiBLESetMockConfiguration()` takes, so a scenario an agent built becomes a fixture for your own tests.
 
+### PM5 Remote
+
+When the simulator app is connected to a real Concept2 PM5 through **Passthrough**, a **PM5 Remote** card appears in the panel. Switch it on to press the PM5's buttons — soft keys **A–E**, **Units**, **Display**, **Menu** — from the Mac while the app stays connected. Agents get the same through `pm5_status`, `pm5_set_remote_enabled`, `pm5_press_key`, `pm5_screen_command` (terminate, rearm, main screen, …), and `pm5_send_csafe` for any CSAFE command.
+
+The commands travel over the app's own connection as CSAFE frames, framed exactly like ErgData's. Apps like ErgData act on every CSAFE reply they receive, so ImpossiBLE keeps the PM5's replies to its own commands away from the app, holds the app's commands back for the moment one is in flight, and only sends when the app is between commands. The remote is off by default.
+
 The MCP server is `impossible-mcp`, bundled inside the app; `make install` links it next to the app. Register it with your agent, e.g. for Claude Code:
 
 ```bash
