@@ -126,6 +126,22 @@ final class PM5RemoteEngineTests: XCTestCase {
         XCTAssertFalse(engine.appMessage(appWrite([0xF2])), "Nothing is held once done")
     }
 
+    func testTheSecondCopyOfOurReplyIsKeptFromTheAppToo() {
+        connectPM5()
+        let done = expectation(description: "done")
+        submitKeyA(done)
+        _ = engine.bridgeMessage(["type": "didWriteValue", "id": pm5, "characteristicId": commandID, "error": ""])
+        XCTAssertTrue(engine.bridgeMessage(response(Self.ack)))
+        wait(for: [done], timeout: 1)
+
+        // The PM5 repeats the reply with the frame-toggle bit flipped.
+        let content: [UInt8] = [0x01, 0x76, 0x01, 0x13]
+        let echo = [0xF1] + content + [content.reduce(0, ^), 0xF2]
+        XCTAssertTrue(engine.bridgeMessage(response(echo)), "The repeat is consumed")
+        XCTAssertFalse(engine.bridgeMessage(response(echo)), "Only once; a later identical reply is the app's")
+        XCTAssertTrue(toApp.isEmpty)
+    }
+
     func testRepliesThatAreNotOursGoToTheApp() {
         connectPM5()
         let done = expectation(description: "done")

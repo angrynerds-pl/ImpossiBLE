@@ -285,11 +285,24 @@ struct PM5Response {
     let checksumValid: Bool
 }
 
+/// One CSAFE frame chunk seen on a PM5's command or response characteristic.
+struct PM5TraceEntry {
+    let sequence: Int
+    let date: Date
+    /// "app→pm", "remote→pm", or "pm→".
+    let direction: String
+    let bytes: [UInt8]
+    /// What happened to it: passed, held, released, consumed, forwarded, …
+    let disposition: String
+}
+
 struct PM5Injection {
     let deviceID: String?
     let payload: [UInt8]
     let label: String
     let swallowResponse: Bool
+    /// ATT write without response; the PM then sends no write confirmation.
+    var writeWithoutResponse = false
     /// Called on the main thread; nil response when it was not awaited.
     let completion: (Result<PM5Response?, ToolError>) -> Void
 }
@@ -315,6 +328,7 @@ public final class PM5Remote: ObservableObject {
     /// Wired by `MockServer` to hand work to the engine on its I/O queue.
     var submitToEngine: ((PM5Injection) -> Void)?
     var setEngineEnabled: ((Bool) -> Void)?
+    var fetchTrace: ((Int, @escaping ([PM5TraceEntry]) -> Void) -> Void)?
 
     init() {
         isEnabled = UserDefaults.standard.bool(forKey: Self.enabledKey)
@@ -331,11 +345,13 @@ public final class PM5Remote: ObservableObject {
         }
     }
 
-    func press(_ key: PM5Key, deviceID: String? = nil,
+    /// `refreshState` reads the PM's state shortly after the press for the
+    /// panel; callers that read it themselves pass false.
+    func press(_ key: PM5Key, deviceID: String? = nil, refreshState: Bool = true,
                completion: ((Result<PM5Response?, ToolError>) -> Void)? = nil) {
         submit(payload: PM5Command.screenState(key.screenValue), label: "Key \(key.title)",
                deviceID: deviceID, swallowResponse: true) { [weak self] result in
-            if case .success = result {
+            if refreshState, case .success = result {
                 DispatchQueue.main.asyncAfter(deadline: .now() + Self.settleDelay) {
                     self?.queryState(deviceID: deviceID)
                 }
@@ -369,6 +385,7 @@ public final class PM5Remote: ObservableObject {
 
     /// `quiet` keeps routine queries out of the panel's last-result line.
     func submit(payload: [UInt8], label: String, deviceID: String?, swallowResponse: Bool, quiet: Bool = false,
+                writeWithoutResponse: Bool = false,
                 completion: ((Result<PM5Response?, ToolError>) -> Void)?) {
         guard isEnabled else {
             completion?(.failure(ToolError("The PM5 remote is off; turn it on in the panel or with pm5_set_remote_enabled")))
@@ -380,7 +397,8 @@ public final class PM5Remote: ObservableObject {
         }
         pendingCount += 1
         submitToEngine(PM5Injection(deviceID: deviceID, payload: payload, label: label,
-                                    swallowResponse: swallowResponse) { [weak self] result in
+                                    swallowResponse: swallowResponse,
+                                    writeWithoutResponse: writeWithoutResponse) { [weak self] result in
             guard let self else { return }
             pendingCount -= 1
             switch result {
@@ -464,6 +482,14 @@ final class PM5RemoteEngine {
     private var active: Active?
     private var waitingSince: Date?
     private var nextToken = 0
+    /// The PM5 answers each command twice (the copies differ only in the
+    /// status byte's frame-toggle bit). After the first copy of a reply to a
+    /// remote command, the second one must be kept from the app as well.
+    private var echoOfConsumedReply: (peripheralID: String, content: [UInt8], until: Date)?
+    static let echoWindow: TimeInterval = 0.3
+    private(set) var trace: [PM5TraceEntry] = []
+    private var nextTraceSequence = 1
+    static let traceCapacity = 500
 
     private let sendToBridge: ([String: Any]) -> Void
     private let sendToApp: ([String: Any]) -> Void
@@ -494,9 +520,11 @@ final class PM5RemoteEngine {
 
         if active?.peripheralID == peripheralID {
             active?.heldAppMessages.append(message)
+            record("app→pm", message, "held while a remote command is in flight")
             return true
         }
         trackAppWrite(message, peripheralID: peripheralID)
+        record("app→pm", message, "passed")
         return false
     }
 
@@ -626,17 +654,22 @@ final class PM5RemoteEngine {
             peripheralID: peripheralID,
             commandCharacteristicID: peripheral.commandCharacteristicID!,
             responseCharacteristicID: peripheral.responseCharacteristicID!,
-            pendingWriteConfirmations: chunks.count,
+            pendingWriteConfirmations: injection.writeWithoutResponse ? 0 : chunks.count,
             token: token
         )
         note("PM5 remote: \(injection.label)")
         for chunk in chunks {
+            record("remote→pm", chunk, injection.label)
             sendToBridge([
                 "type": "write",
                 "characteristicId": peripheral.commandCharacteristicID!,
                 "value": Data(chunk).base64EncodedString(),
-                "writeType": 0,
+                "writeType": injection.writeWithoutResponse ? 1 : 0,
             ])
+        }
+        if injection.writeWithoutResponse && !injection.swallowResponse {
+            finish(.success(nil))
+            return
         }
         schedule(Self.responseTimeout) { [weak self] in
             guard let self, self.active?.token == token else { return }
@@ -668,13 +701,27 @@ final class PM5RemoteEngine {
         else { return false }
         let bytes = (message["value"] as? String).flatMap { Data(base64Encoded: $0) }.map { [UInt8]($0) } ?? []
 
+        if let echo = echoOfConsumedReply, echo.peripheralID == peripheralID {
+            if Date() < echo.until, bytes.last == CSAFE.end,
+               let unframed = CSAFE.unframe(bytes), Array(unframed.content.dropFirst()) == echo.content {
+                echoOfConsumedReply = nil
+                record("pm→", bytes, "second copy of a remote reply; kept back")
+                return true
+            }
+            if Date() >= echo.until {
+                echoOfConsumedReply = nil
+            }
+        }
+
         guard var current = active, current.peripheralID == peripheralID, current.injection.swallowResponse else {
+            record("pm→", bytes, "to app")
             if bytes.last == CSAFE.end {
                 peripherals[peripheralID]?.appAwaitingReplySince = nil
             }
             return false
         }
 
+        record("pm→", bytes, "kept back while awaiting \(current.injection.label)")
         current.responseChunks.append(message)
         current.responseBytes += bytes
         active = current
@@ -684,10 +731,12 @@ final class PM5RemoteEngine {
            unframed.content.count >= 2, unframed.content[1] == current.injection.payload.first {
             let response = PM5Response(status: unframed.content[0], content: unframed.content,
                                        frame: current.responseBytes, checksumValid: true)
+            echoOfConsumedReply = (peripheralID, Array(unframed.content.dropFirst()), Date().addingTimeInterval(Self.echoWindow))
             active?.responseChunks.removeAll()
             finish(.success(response))
         } else {
             // Not ours — most likely a late reply to the app's own command.
+            record("pm→", current.responseBytes, "not ours; forwarded to app")
             current.responseChunks.forEach(sendToApp)
             active?.responseChunks.removeAll()
             active?.responseBytes.removeAll()
@@ -704,6 +753,7 @@ final class PM5RemoteEngine {
         current.responseChunks.forEach(sendToApp)
         if flushHeld {
             for message in current.heldAppMessages {
+                record("app→pm", message, "released")
                 trackAppWrite(message, peripheralID: current.peripheralID)
                 sendToBridge(message)
             }
@@ -753,6 +803,24 @@ final class PM5RemoteEngine {
 
     private func peripheralID(forCommandCharacteristic characteristicID: String) -> String? {
         peripherals.first { $0.value.commandCharacteristicID == characteristicID }?.key
+    }
+
+    func trace(after sequence: Int) -> [PM5TraceEntry] {
+        trace.filter { $0.sequence > sequence }
+    }
+
+    private func record(_ direction: String, _ message: [String: Any], _ disposition: String) {
+        let bytes = (message["value"] as? String).flatMap { Data(base64Encoded: $0) }.map { [UInt8]($0) } ?? []
+        record(direction, bytes, disposition)
+    }
+
+    private func record(_ direction: String, _ bytes: [UInt8], _ disposition: String) {
+        trace.append(PM5TraceEntry(sequence: nextTraceSequence, date: Date(), direction: direction,
+                                   bytes: bytes, disposition: disposition))
+        nextTraceSequence += 1
+        if trace.count > Self.traceCapacity {
+            trace.removeFirst(trace.count - Self.traceCapacity)
+        }
     }
 
     private func trackAppWrite(_ message: [String: Any], peripheralID: String) {

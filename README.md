@@ -317,7 +317,8 @@ Working-set edits are saved immediately but only change a stored configuration t
 | `pm5_press_key` | `key`: `A`–`E`, `units`, `display`, `menu`; `device`? | Presses a PM5 button and returns the PM5's state just after. |
 | `pm5_get_state` | `device`? | Operational state, workout state, rowing state, workout and interval type, display type and units, battery, last screen command. |
 | `pm5_screen_command` | `command`: `prepareToWorkout` \| `terminateWorkout` \| `rearmWorkout` \| `goToMainScreen`; `device`? | Workout-screen actions. `terminateWorkout` ends the workout in progress. |
-| `pm5_send_csafe` | `payload` (hex), `awaitResponse`?, `device`? | Any CSAFE command, unframed (ImpossiBLE adds framing, checksum, byte stuffing). Returns the PM5's reply. |
+| `pm5_send_csafe` | `payload` (hex), `awaitResponse`?, `writeWithoutResponse`?, `device`? | Any CSAFE command, unframed (ImpossiBLE adds framing, checksum, byte stuffing). Returns the PM5's reply. |
+| `pm5_trace` | `since`? | Recent CSAFE traffic on the PM5's command and response characteristics: what the app wrote, what the remote sent, and what happened to each reply (passed to the app or kept back). For debugging. |
 
 ### Device format
 
@@ -384,6 +385,7 @@ Tools that take or return devices use JSON that is easy to write by hand:
 | The app shows Bluetooth as off | The mode is **Off**, or the app is not connected (see above). |
 | Mock devices do not appear in the app | The mode is not **Mock**, the device is disabled (`set_device_enabled`), or the app uploaded its own configuration, which takes precedence (`get_status` shows `appSuppliedConfiguration`). |
 | Capture finds nothing | The Mac's Bluetooth permission was not granted yet (development builds ask again after each rebuild), or the device is off or connected elsewhere. |
+| One PM5 button press moves two screens | The PM5 was processing every command twice; `pm5_trace` shows each command answered twice, with the status byte alternating `81`/`01`. Seen once with a stale connection, and gone after restarting ImpossiBLE and reconnecting the app to the PM5. |
 | `pm5_*` tools say no PM5 is connected | The mode must be **Passthrough** and the simulator app connected to the PM5. A PM5 is *ready* only once the app has subscribed to its responses. |
 
 ### PM5 Remote
