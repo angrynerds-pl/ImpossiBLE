@@ -49,6 +49,15 @@ final class Bridge {
         }
     }
 
+    /// Waits until every forwarded request has its reply (or the connection
+    /// dropped, which answers them with errors), up to `timeout`.
+    func drain(timeout: TimeInterval) {
+        let deadline = Date().addingTimeInterval(timeout)
+        while lock.withLock({ !pending.isEmpty }) && Date() < deadline {
+            usleep(20_000)
+        }
+    }
+
     // MARK: - Connection
 
     private func connection() -> (Int32, Int)? {
@@ -222,4 +231,7 @@ while let line = readLine(strippingNewline: true) {
     if line.trimmingCharacters(in: .whitespaces).isEmpty { continue }
     bridge.forward(line)
 }
+// stdin closed (e.g. `printf … | impossible-mcp`): deliver the replies that
+// are still on their way before exiting. Long enough for a capture_save.
+bridge.drain(timeout: 300)
 exit(0)
