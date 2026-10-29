@@ -10,6 +10,9 @@ let package = Package(
         // thin wrapper around the same target.
         .library(name: "ImpossiBLEProviderKit", targets: ["ImpossiBLEProviderKit"]),
         .executable(name: "ImpossiBLE-Mac", targets: ["ImpossiBLE-Mac"]),
+        // The stdio MCP server agents launch; pipes to the running app's
+        // control socket. Bundled at Contents/Helpers/impossible-mcp.
+        .executable(name: "impossible-mcp", targets: ["impossible-mcp"]),
     ],
     dependencies: [
         .package(url: "https://github.com/mickeyl/SimBridgeKit.git", from: "0.1.1"),
@@ -43,6 +46,18 @@ let package = Package(
                 .product(name: "SimBridgeShell", package: "SimBridgeKit"),
             ],
             path: "App"
-        )
+        ),
+        .executableTarget(
+            name: "impossible-mcp",
+            path: "MCPShim"
+        ),
+        .testTarget(
+            name: "ImpossiBLEProviderKitTests",
+            dependencies: [
+                "ImpossiBLEProviderKit",
+                .product(name: "SimBridgeShell", package: "SimBridgeKit"),
+            ],
+            path: "Tests/ImpossiBLEProviderKitTests"
+        ),
     ]
 )

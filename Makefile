@@ -13,6 +13,10 @@ MAC_ICON = Sources/ImpossiBLE-Mac/Resources/ImpossiBLE.icns
 MAC_BUNDLE = ImpossiBLE-Mac.app
 MAC_BIN = $(MAC_BUNDLE)/Contents/MacOS/ImpossiBLE-Mac
 MAC_BIN_NAME = ImpossiBLE-Mac
+# The MCP shim lives outside Contents/MacOS on purpose: the stop/relaunch
+# targets pkill that path, which must not kill agents' running shims.
+MAC_MCP_NAME = impossible-mcp
+MAC_MCP = $(MAC_BUNDLE)/Contents/Helpers/$(MAC_MCP_NAME)
 MAC_FONT_RESOURCE = Sources/ImpossiBLE-Mac/ProviderKit/Resources/fa-brands-400.ttf
 INSTALLED_MAC_APP = $(INSTALL_DIR)/$(MAC_BUNDLE)
 MAC_DIST_ZIP = ImpossiBLE-Mac.zip
@@ -48,7 +52,7 @@ help:
 	@echo "  mac-clean  Remove Mac build artifacts"
 	@echo ""
 	@echo "General:"
-	@echo "  install     Build and install the Mac app to \$$(prefix)/bin  [$(prefix)]"
+	@echo "  install     Build and install the Mac app (and the impossible-mcp link) to \$$(prefix)/bin  [$(prefix)]"
 	@echo "  uninstall   Remove installed files from \$$(prefix)/bin"
 	@echo "  clean       Remove all build artifacts"
 	@echo ""
@@ -64,9 +68,11 @@ mac-install: mac
 	rm -rf $(INSTALLED_MAC_APP)
 	cp -R $(MAC_BUNDLE) $(INSTALL_DIR)/
 	@xattr -cr $(INSTALLED_MAC_APP) 2>/dev/null || true
+	ln -sf $(INSTALLED_MAC_APP)/Contents/Helpers/$(MAC_MCP_NAME) $(INSTALL_DIR)/$(MAC_MCP_NAME)
 
 uninstall:
 	rm -rf $(INSTALLED_MAC_APP)
+	rm -f $(INSTALL_DIR)/$(MAC_MCP_NAME)
 	rm -rf $(LEGACY_HELPER_APP)
 	rm -f $(LEGACY_HELPER_WRAPPER)
 	@echo "Uninstalled from $(INSTALL_DIR)"
@@ -97,11 +103,14 @@ mac-relaunch:
 	@if [ -n "$(BUILD_NUMBER)" ]; then /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(BUILD_NUMBER)" $(MAC_BUNDLE)/Contents/Info.plist; fi
 	@cd Sources/ImpossiBLE-Mac && swift build $(SWIFTPM_FLAGS) 2>&1 | tail -3
 	@cp Sources/ImpossiBLE-Mac/.build/debug/$(MAC_BIN_NAME) $(MAC_BIN)
+	@mkdir -p $(MAC_BUNDLE)/Contents/Helpers
+	@cp Sources/ImpossiBLE-Mac/.build/debug/$(MAC_MCP_NAME) $(MAC_MCP)
 	@cp $(MAC_ICON) $(MAC_BUNDLE)/Contents/Resources/ImpossiBLE.icns
 	@cp $(MAC_FONT_RESOURCE) $(MAC_BUNDLE)/Contents/Resources/
+	@codesign --force --sign - $(MAC_MCP) >/dev/null
 	@codesign --force --sign - --entitlements $(MAC_ENTITLEMENTS) $(MAC_BUNDLE) >/dev/null
 	@xattr -cr $(MAC_BUNDLE) 2>/dev/null || true
-	@pkill -f "ImpossiBLE-Mac" 2>/dev/null && sleep 0.5 || true
+	@pkill -f "$(MAC_BIN_NAME).app/Contents/MacOS" 2>/dev/null && sleep 0.5 || true
 	@open "$(MAC_BUNDLE)"
 	@echo "Mac app relaunched (debug build)"
 
@@ -112,14 +121,18 @@ $(MAC_BIN): $(MAC_SRCS) $(MAC_PLIST) $(MAC_ENTITLEMENTS) $(MAC_ICON) $(MAC_FONT_
 	@if [ -n "$(BUILD_NUMBER)" ]; then /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(BUILD_NUMBER)" $(MAC_BUNDLE)/Contents/Info.plist; fi
 	cd Sources/ImpossiBLE-Mac && swift build $(SWIFTPM_FLAGS) -c release
 	cp Sources/ImpossiBLE-Mac/.build/release/ImpossiBLE-Mac $(MAC_BIN)
+	mkdir -p $(MAC_BUNDLE)/Contents/Helpers
+	cp Sources/ImpossiBLE-Mac/.build/release/$(MAC_MCP_NAME) $(MAC_MCP)
 	cp $(MAC_ICON) $(MAC_BUNDLE)/Contents/Resources/ImpossiBLE.icns
 	cp $(MAC_FONT_RESOURCE) $(MAC_BUNDLE)/Contents/Resources/
 	@if [ -z "$(MAC_SIGN_IDENTITY)" ]; then \
 		echo "WARNING: No codesigning identity matching '$(MAC_CODESIGN_MATCH)' found in your keychain."; \
 		echo "Signing the Mac app ad hoc. Gatekeeper will reject quarantined or distributed copies."; \
+		codesign --force --sign - $(MAC_MCP); \
 		codesign --force --sign - --entitlements $(MAC_ENTITLEMENTS) $(MAC_BUNDLE); \
 	else \
 		echo "Codesigning Mac app with: $(MAC_SIGN_IDENTITY)"; \
+		codesign --force --sign "$(MAC_SIGN_IDENTITY)" $(MAC_CODESIGN_FLAGS) $(MAC_MCP); \
 		codesign --force --sign "$(MAC_SIGN_IDENTITY)" $(MAC_CODESIGN_FLAGS) --entitlements $(MAC_ENTITLEMENTS) $(MAC_BUNDLE); \
 	fi
 	@xattr -cr $(MAC_BUNDLE) 2>/dev/null || true
