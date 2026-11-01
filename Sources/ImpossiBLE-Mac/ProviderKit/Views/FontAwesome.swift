@@ -9,6 +9,7 @@ public enum FontAwesome {
         case off
         case mock
         case passthrough
+        case replay
     }
 
     private static var registered = false
@@ -89,6 +90,21 @@ public enum FontAwesome {
 
             case .passthrough:
                 break
+
+            case .replay:
+                // Small ring badge in lower-right corner (hollow counterpart
+                // of the mock dot: listening, but nothing is answered)
+                let ringSize = max(4, size * 0.3)
+                let lineWidth = max(1, size * 0.08)
+                let ring = NSBezierPath(ovalIn: NSRect(
+                    x: canvasSize.width - ringSize - 0.5 + lineWidth / 2,
+                    y: 0.5 + lineWidth / 2,
+                    width: ringSize - lineWidth,
+                    height: ringSize - lineWidth
+                ))
+                ring.lineWidth = lineWidth
+                foreground.setStroke()
+                ring.stroke()
         }
 
         image.unlockFocus()

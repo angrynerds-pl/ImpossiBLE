@@ -1627,6 +1627,10 @@ static void cbs_ensure_connection_open(void) {
     });
 }
 
+void CBSEnsureConnectionOpen(void) {
+    cbs_ensure_connection_open();
+}
+
 static void cbs_post_init(id obj, id delegate, dispatch_queue_t queue) {
     cbs_ensure_connection_open();
     dispatch_queue_t q = queue ?: dispatch_get_main_queue();
@@ -1920,6 +1924,8 @@ static void cbs_swizzle_class(Class cls, SEL sel, IMP imp, IMP *orig_out) {
     }
 
     NSLog(@"ImpossiBLE: swizzles installed");
+
+    CBSReplayStartFromEnvironment();
 }
 
 @end

@@ -7,7 +7,7 @@ import SimBridgeShell
 private final class MacAppRuntime {
     let store: MockStore
     let server: MockServer
-    let modeController: ModeTransitionController<ProviderMode>
+    let modeController: ModeTransitionController<ImpossiBLEMode>
     let control: ProviderControlServer
     let statusBar: StatusBarController
 
@@ -19,7 +19,7 @@ private final class MacAppRuntime {
         // switches always bounce through a stop so a connected client observes
         // a disconnect instead of silently changing provider behavior.
         modeController = ModeTransitionController(
-            initial: ProviderMode.persisted(legacyServerEnabledKey: "ServerEnabled"),
+            initial: ImpossiBLEMode.persisted(legacyServerEnabledKey: "ServerEnabled"),
             persist: { $0.persist() }
         ) { mode, completion in
             switch mode {
@@ -32,6 +32,10 @@ private final class MacAppRuntime {
                 case .passthrough:
                     server.stop {
                         server.start(mode: .passthrough, completion: completion)
+                    }
+                case .replay:
+                    server.stop {
+                        server.start(mode: .replay, completion: completion)
                     }
             }
         }
@@ -69,7 +73,7 @@ struct MacApp: App {
 
     @StateObject private var store: MockStore
     @StateObject private var server: MockServer
-    @StateObject private var modeController: ModeTransitionController<ProviderMode>
+    @StateObject private var modeController: ModeTransitionController<ImpossiBLEMode>
     @StateObject private var statusBar: StatusBarController
 
     init() {

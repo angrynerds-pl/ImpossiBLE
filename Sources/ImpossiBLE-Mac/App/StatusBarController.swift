@@ -13,7 +13,7 @@ import SimBridgeShell
 final class StatusBarController: NSObject, ObservableObject, NSWindowDelegate {
     private let store: MockStore
     private let server: MockServer
-    private let modeController: ModeTransitionController<ProviderMode>
+    private let modeController: ModeTransitionController<ImpossiBLEMode>
     private let control: ProviderControlServer
     private var panel: StatusItemPanelController!
     private var captureWindow: NSWindow?
@@ -24,7 +24,7 @@ final class StatusBarController: NSObject, ObservableObject, NSWindowDelegate {
     init(
         store: MockStore,
         server: MockServer,
-        modeController: ModeTransitionController<ProviderMode>,
+        modeController: ModeTransitionController<ImpossiBLEMode>,
         control: ProviderControlServer
     ) {
         self.store = store
@@ -82,7 +82,11 @@ final class StatusBarController: NSObject, ObservableObject, NSWindowDelegate {
             case .stopped, .blocked:
                 .off
             case .listening, .clientConnected:
-                modeController.mode == .passthrough ? .passthrough : .mock
+                switch modeController.mode {
+                    case .off, .mock: .mock
+                    case .passthrough: .passthrough
+                    case .replay: .replay
+                }
         }
     }
 

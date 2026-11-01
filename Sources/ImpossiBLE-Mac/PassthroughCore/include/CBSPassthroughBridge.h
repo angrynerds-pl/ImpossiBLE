@@ -20,6 +20,22 @@ NS_ASSUME_NONNULL_BEGIN
                                                               NSString *operation,
                                                               NSString *detail);
 
+/// Called on the recorder's private queue whenever a recording opens a new
+/// session file, with its absolute path. Set before starting a recording.
+@property (nonatomic, copy, nullable) void (^recordingFileHandler)(NSString *path);
+
+/// Whether wire traffic is being recorded. Off until started.
+@property (nonatomic, readonly, getter=isRecording) BOOL recording;
+
+/// Records every protocol message in both directions as JSON (see
+/// `CBSWireRecorder`), one `passthrough-<date>-<pid>-<ptr>.json` file per
+/// client session, the first one opening with the next message. Starting
+/// again closes the current file.
+- (void)startRecordingToDirectory:(NSString *)directory;
+
+/// Closes the current recording file and records nothing further.
+- (void)stopRecording;
+
 /// Feed one decoded protocol message. Call from a single serial queue.
 - (void)handleMessage:(NSDictionary<NSString *, id> *)message;
 

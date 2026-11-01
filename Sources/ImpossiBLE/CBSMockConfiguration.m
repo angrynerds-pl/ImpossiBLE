@@ -63,6 +63,7 @@ BOOL ImpossiBLEIsProviderConnected(void)
 /// Opens the socket if needed and waits up to `timeout` for it to come up.
 static BOOL CBSWaitForProvider(NSTimeInterval timeout)
 {
+    CBSEnsureConnectionOpen();
     CBSConnectionOpen();
     if (CBSConnectionIsConnected()) return YES;
 

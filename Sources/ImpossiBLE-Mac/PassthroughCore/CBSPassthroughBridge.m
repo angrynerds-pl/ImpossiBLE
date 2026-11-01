@@ -1,4 +1,5 @@
 #import "include/CBSPassthroughBridge.h"
+#import "include/CBSWireRecorder.h"
 #import <CoreBluetooth/CoreBluetooth.h>
 #import <objc/runtime.h>
 #import <stdlib.h>
@@ -61,6 +62,8 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
 @property(nonatomic, strong) NSDictionary *pendingOptions;
 @property(nonatomic, strong) NSMutableSet<NSUUID *> *seenScanPeripherals;
 @property(nonatomic, assign) BOOL scanShouldDeduplicate;
+// Atomic: replaced from the host's queue, read from the CB and out queues.
+@property(atomic, strong, nullable) CBSWireRecorder *recorder;
 @end
 
 @implementation CBSPassthroughBridge
@@ -83,6 +86,22 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
         _scanShouldDeduplicate = YES;
     }
     return self;
+}
+
+- (void)startRecordingToDirectory:(NSString *)directory {
+    [self.recorder finish];
+    CBSWireRecorder *recorder = [[CBSWireRecorder alloc] initWithDirectory:directory filePrefix:@"passthrough"];
+    recorder.fileOpenedHandler = self.recordingFileHandler;
+    self.recorder = recorder;
+}
+
+- (void)stopRecording {
+    [self.recorder finish];
+    self.recorder = nil;
+}
+
+- (BOOL)isRecording {
+    return self.recorder != nil;
 }
 
 - (NSDictionary *)scanOptionsFromWire:(NSDictionary *)wireOptions {
@@ -139,6 +158,8 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
     self.scanShouldDeduplicate = YES;
     self.pendingServices = nil;
     self.pendingOptions = nil;
+    // The next client session records into a fresh file.
+    [self.recorder finish];
 
     dispatch_async(self.cbQueue, ^{
         [self.central stopScan];
@@ -270,6 +291,7 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
         return;
     }
     CBSDebugLog(@"recv type=%@", type);
+    [self.recorder recordMessage:msg direction:CBSWireDirectionFromClient];
 
     if ([type isEqualToString:@"registerForConnectionEvents"]) {
         // registerForConnectionEventsWithOptions: is not available in the macOS
@@ -694,6 +716,7 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
     if (!handler) {
         return;
     }
+    [self.recorder recordMessage:msg direction:CBSWireDirectionToClient];
     dispatch_async(self.outQueue, ^{
         handler(msg);
     });

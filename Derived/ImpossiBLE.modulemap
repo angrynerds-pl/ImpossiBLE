@@ -1,0 +1,6 @@
+framework module ImpossiBLE {
+  umbrella header "/Users/amichnia/Projects/angrynerds-forks/ImpossiBLE/Sources/ImpossiBLE/include/ImpossiBLE.h"
+
+  export *
+  module * { export * }
+}

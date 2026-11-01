@@ -37,6 +37,67 @@ void ImpossiBLEClearMockConfiguration(void);
 /// Tests should wait for this before uploading a configuration.
 BOOL ImpossiBLEIsProviderConnected(void);
 
+/// Replays a wire recording inside this process — no menu bar app needed.
+///
+/// `path` names a recording in the format Passthrough writes to
+/// `/tmp/impossible-passthrough-recordings/` (a JSON array of `{seq, timestamp,
+/// direction, message}` entries). A UI test can bundle one and hand its path to
+/// the app (e.g. via `launchEnvironment`); the Simulator shares the Mac's file
+/// system, so the test bundle's path is readable as is. `~` is expanded.
+///
+/// After setup the library behaves as if the menu bar app were serving it in
+/// Replay mode: Bluetooth reports powered on, and the socket to the menu bar
+/// app is dropped and not reconnected until `ImpossiBLECleanupReplay`. Call it
+/// before creating a `CBCentralManager` to avoid a powered-off/on bounce.
+///
+/// The recording is validated up front; returns NO with `error` describing the
+/// first problem when it is unreadable or invalid. Setting up again replaces
+/// the previous recording. Always NO on device builds.
+///
+/// A UI test does not need the app to call this: launching the app with the
+/// `IMPOSSIBLE_REPLAY_RECORDING` environment variable set to a recording path
+/// sets up and starts that replay when the library loads.
+BOOL ImpossiBLESetupReplay(NSString *path, NSError * _Nullable * _Nullable error);
+
+/// Starts playing the recording, entries in `seq` order, waiting each entry's
+/// recorded time distance from the previous one: `toClient` messages are
+/// delivered as if from a peripheral, and each `fromClient` entry waits for
+/// the app to send a matching message (same type and ids; data values are not
+/// compared), failing the run after 60 s. Messages the app sent since setup
+/// count, so starting right after the app began scanning is fine. Calling it
+/// again restarts from the first entry. NO when nothing is set up.
+BOOL ImpossiBLEStartReplay(NSError * _Nullable * _Nullable error);
+
+/// Stops the running replay; nothing is answered until the next start. The
+/// recording stays set up. NO when nothing is set up.
+BOOL ImpossiBLEStopReplay(NSError * _Nullable * _Nullable error);
+
+/// Unloads the recording: replayed peripherals disconnect, Bluetooth briefly
+/// reports powered off, and the library reconnects to the menu bar app if one
+/// is running. Succeeds when nothing is set up.
+BOOL ImpossiBLECleanupReplay(NSError * _Nullable * _Nullable error);
+
+typedef NS_ENUM(NSInteger, ImpossiBLEReplayState) {
+    /// Nothing set up (after cleanup).
+    ImpossiBLEReplayStateIdle,
+    /// Set up, waiting for start.
+    ImpossiBLEReplayStateReady,
+    /// Playing; reported whenever the run starts waiting (delay or app message).
+    ImpossiBLEReplayStateRunning,
+    /// Every entry played.
+    ImpossiBLEReplayStatePassed,
+    /// An expected app message did not arrive in time; `detail` says which.
+    ImpossiBLEReplayStateFailed,
+    /// Stopped by `ImpossiBLEStopReplay` (or replaced by a new setup).
+    ImpossiBLEReplayStateStopped,
+};
+
+typedef void (^ImpossiBLEReplayStatusHandler)(ImpossiBLEReplayState state, NSString * _Nullable detail);
+
+/// Observes replay progress, on the main queue. Results are also logged
+/// (`ImpossiBLE: replay passed` / `FAILED — …`). Pass nil to stop observing.
+void ImpossiBLESetReplayStatusHandler(ImpossiBLEReplayStatusHandler _Nullable handler);
+
 /// Receives the far end of an L2CAP channel the app just opened.
 ///
 /// `psm` is a `CBL2CAPPSM`, typed here as `uint16_t` so this header stays free

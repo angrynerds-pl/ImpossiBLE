@@ -10,7 +10,7 @@ public struct MockMenuContent: View {
     @ObservedObject var server: MockServer
     @ObservedObject var transport: ProtocolServer
     @ObservedObject var activity: PassthroughActivityMonitor
-    @ObservedObject var controller: ModeTransitionController<ProviderMode>
+    @ObservedObject var controller: ModeTransitionController<ImpossiBLEMode>
     var control: ProviderControlServer?
     var onDismiss: (() -> Void)?
     var onOpenCapture: (() -> Void)?
@@ -29,7 +29,7 @@ public struct MockMenuContent: View {
         server: MockServer,
         transport: ProtocolServer,
         activity: PassthroughActivityMonitor,
-        controller: ModeTransitionController<ProviderMode>,
+        controller: ModeTransitionController<ImpossiBLEMode>,
         control: ProviderControlServer? = nil,
         onDismiss: (() -> Void)? = nil,
         onOpenCapture: (() -> Void)? = nil,

@@ -12,7 +12,7 @@ public struct ImpossiBLESection: View {
     @ObservedObject var server: MockServer
     @ObservedObject var transport: ProtocolServer
     @ObservedObject var activity: PassthroughActivityMonitor
-    @ObservedObject var controller: ModeTransitionController<ProviderMode>
+    @ObservedObject var controller: ModeTransitionController<ImpossiBLEMode>
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openWindow) private var openWindow
     /// A host that surfaces the connected client on its own level (the suite
@@ -32,7 +32,7 @@ public struct ImpossiBLESection: View {
         server: MockServer,
         transport: ProtocolServer,
         activity: PassthroughActivityMonitor,
-        controller: ModeTransitionController<ProviderMode>,
+        controller: ModeTransitionController<ImpossiBLEMode>,
         showsClient: Bool = true,
         onDismiss: (() -> Void)? = nil,
         onOpenCapture: (() -> Void)? = nil,
@@ -53,7 +53,7 @@ public struct ImpossiBLESection: View {
         VStack(spacing: 0) {
             VStack(spacing: 8) {
                 Picker("Mode", selection: modeBinding) {
-                    ForEach(ProviderMode.allCases, id: \.self) { mode in
+                    ForEach(ImpossiBLEMode.allCases, id: \.self) { mode in
                         Text(mode.title).tag(mode)
                     }
                 }
@@ -77,6 +77,8 @@ public struct ImpossiBLESection: View {
                     mockBody
                 case .passthrough:
                     passthroughBody
+                case .replay:
+                    replayBody
             }
         }
         .onAppear {
@@ -85,11 +87,11 @@ public struct ImpossiBLESection: View {
     }
 
     /// The provider's health, for a host that wants to tint its own chrome.
-    public static func statusColor(mode: ProviderMode, status: ProtocolServer.Status) -> Color {
+    public static func statusColor(mode: ImpossiBLEMode, status: ProtocolServer.Status) -> Color {
         switch mode {
             case .off:
                 .secondary
-            case .mock, .passthrough:
+            case .mock, .passthrough, .replay:
                 switch status {
                     case .stopped:         .secondary
                     case .listening:       .blue
@@ -227,11 +229,11 @@ public struct ImpossiBLESection: View {
 
     // MARK: - Mode
 
-    private var currentMode: ProviderMode {
+    private var currentMode: ImpossiBLEMode {
         controller.mode
     }
 
-    private var modeBinding: Binding<ProviderMode> {
+    private var modeBinding: Binding<ImpossiBLEMode> {
         Binding(
             get: { controller.mode },
             set: { controller.select($0) }
@@ -276,6 +278,8 @@ public struct ImpossiBLESection: View {
                 "antenna.radiowaves.left.and.right.circle"
             case .passthrough:
                 activity.trafficActive ? "bolt.horizontal.circle.fill" : "antenna.radiowaves.left.and.right.circle"
+            case .replay:
+                "record.circle"
         }
     }
 
@@ -283,7 +287,7 @@ public struct ImpossiBLESection: View {
         switch currentMode {
             case .off:
                 "Off"
-            case .mock, .passthrough:
+            case .mock, .passthrough, .replay:
                 statusText
         }
     }
@@ -302,6 +306,10 @@ public struct ImpossiBLESection: View {
                 let summary = passthroughDetailText
                 guard !activity.lastActivity.isEmpty else { return summary }
                 return "\(summary) · \(activity.lastActivity)"
+            case .replay:
+                let summary = replayDetailText
+                guard !transport.lastActivity.isEmpty else { return summary }
+                return "\(summary) · \(transport.lastActivity)"
         }
     }
 
@@ -327,6 +335,13 @@ public struct ImpossiBLESection: View {
             return "\(devices.count) communicating \(deviceWord)"
         }
         return "No device traffic yet"
+    }
+
+    private var replayDetailText: String {
+        guard transport.status != .stopped else { return "No replay provider running" }
+        let count = server.replayRecording.receivedCount
+        guard count > 0 else { return "No messages recorded yet" }
+        return "\(count) \(count == 1 ? "message" : "messages") recorded"
     }
 
     // MARK: - Configuration Bar
@@ -607,6 +622,12 @@ public struct ImpossiBLESection: View {
         VStack(spacing: 0) {
             PM5RemotePanel(remote: server.pm5Remote)
             passthroughActivityList
+            PassthroughRecordingBar(
+                state: server.passthroughRecording,
+                onToggle: { server.setPassthroughRecording(!server.passthroughRecording.isRecording) }
+            )
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -631,6 +652,52 @@ public struct ImpossiBLESection: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // MARK: - Replay Body
+
+    private var replayBody: some View {
+        VStack(spacing: 12) {
+            ReplayScriptDropZone(
+                script: server.replayScript,
+                canRestart: transport.status == .clientConnected,
+                onLoad: { server.loadReplayScript(from: $0) },
+                onRestart: { server.restartReplay() },
+                onClear: { server.clearReplayScript() }
+            )
+            .padding(.horizontal, 12)
+            .padding(.top, 12)
+
+            if server.replayScript?.isValid == true {
+                ReplayRunStatusRow(status: server.replayRun)
+                    .padding(.horizontal, 12)
+                Spacer(minLength: 0)
+            } else {
+                bodyPlaceholder(
+                    title: "Recording client traffic",
+                    message: "Messages from the connected app are written to a file. Load a recording above to answer them."
+                ) {
+                    Image(systemName: "record.circle")
+                        .font(.system(size: Self.bodyPlaceholderGlyphSize))
+                        .foregroundStyle(.secondary.opacity(0.35))
+                }
+            }
+
+            replayRecordingFooter(path: server.replayRecording.path)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func replayRecordingFooter(path: String?) -> some View {
+        HStack(spacing: 6) {
+            if let path {
+                RecordingFileLabel(path: path)
+            }
+            Spacer(minLength: 4)
+            RecordingsFolderButton(directory: PassthroughRecordingState.directory)
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 12)
     }
 
     private func passthroughPlaceholder(systemImage: String, tint: Color, message: String) -> some View {

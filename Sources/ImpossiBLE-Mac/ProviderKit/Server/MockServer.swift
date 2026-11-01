@@ -14,9 +14,41 @@ struct ClientSuppliedConfiguration: Equatable {
     var sourceDescription: String { client?.displayText ?? "connected app" }
 }
 
+/// What Replay mode has recorded for the current (or most recent) client.
+struct ReplayRecordingState: Equatable {
+    var path: String?
+    var receivedCount = 0
+}
+
+/// Passthrough's opt-in wire recording: off until started from the panel.
+struct PassthroughRecordingState: Equatable {
+    static let directory = "/tmp/impossible-passthrough-recordings"
+
+    var isRecording = false
+    /// The file of the current (or most recent) session, once one opened.
+    var path: String?
+}
+
+/// The recording loaded for Replay mode, and whether it passed validation.
+struct ReplayScriptState: Equatable {
+    enum Validity: Equatable {
+        case valid(entries: Int, fromClient: Int, toClient: Int)
+        case invalid(String)
+    }
+
+    let url: URL
+    let validity: Validity
+
+    var isValid: Bool {
+        if case .valid = validity { return true }
+        return false
+    }
+}
+
 /// The domain layer behind `/tmp/impossible.sock`, serving the ImpossiBLE wire
-/// protocol in one of two modes: answering from mock data, or forwarding to
-/// real Mac Bluetooth hardware through the in-process `CBSPassthroughBridge`.
+/// protocol in one of three modes: answering from mock data, forwarding to
+/// real Mac Bluetooth hardware through the in-process `CBSPassthroughBridge`,
+/// or recording the client's traffic through `ReplayEngine`.
 ///
 /// The transport itself — socket lifecycle, NDJSON framing, hello handshake,
 /// last-connection-wins takeover, client-socket hardening, and the
@@ -27,6 +59,7 @@ public final class MockServer: ObservableObject {
     public enum ServeMode: Sendable {
         case mock
         case passthrough
+        case replay
     }
 
     /// Socket lifecycle, connection status, client identity, and the activity
@@ -39,6 +72,13 @@ public final class MockServer: ObservableObject {
     /// the user's configuration while a different one is being served.
     @Published private(set) var clientSuppliedConfiguration: ClientSuppliedConfiguration?
     @Published var pairedDeviceIDs: Set<String> = []
+    @Published private(set) var passthroughRecording = PassthroughRecordingState()
+    @Published private(set) var replayRecording = ReplayRecordingState()
+    @Published private(set) var replayScript: ReplayScriptState?
+    @Published private(set) var replayRun: ReplayRunStatus = .idle
+    /// Main thread only. Identifies the responder whose status `replayRun`
+    /// shows, so a replaced responder's late updates are ignored.
+    private var replayRunID = 0
 
     public weak var store: MockStore?
     public let passthroughActivity = PassthroughActivityMonitor()
@@ -73,6 +113,15 @@ public final class MockServer: ObservableObject {
     /// Created on first Passthrough start and kept for the process lifetime;
     /// instantiating it triggers the one-time macOS Bluetooth consent prompt.
     private var passthroughBridge: CBSPassthroughBridge?
+    /// Applied to the bridge when it is created, and whenever it changes.
+    private var passthroughRecordingEnabled = false
+    /// Created on first Replay start and kept for the process lifetime.
+    private var replayEngine: ReplayEngine?
+    /// The validated script, applied to the engine whenever it exists.
+    private var activeReplayScript: ReplayScript?
+    /// The scripted responder currently installed, for restarts.
+    private var scriptedReplayResponder: ScriptedReplayResponder?
+    private var nextReplayRunID = 0
 
     private static let serverEnabledKey = "ServerEnabled"
 
@@ -108,8 +157,10 @@ public final class MockServer: ObservableObject {
         UserDefaults.standard.set(true, forKey: Self.serverEnabledKey)
         transport.performOnIOQueue { [self] in
             serveMode = mode
-            if mode == .passthrough {
-                preparePassthroughBridge()
+            switch mode {
+                case .mock: break
+                case .passthrough: preparePassthroughBridge()
+                case .replay: prepareReplayEngine()
             }
         }
         transport.start(completion: completion)
@@ -130,6 +181,9 @@ public final class MockServer: ObservableObject {
         currentClient = client
         isClientConnected = true
         tearDownClientState()
+        if serveMode == .replay {
+            replayEngine?.begin()
+        }
         if serveMode == .mock {
             activityLog.append("appConnected", detail: client?.displayText)
         }
@@ -150,6 +204,8 @@ public final class MockServer: ObservableObject {
         passthroughBridge?.reset()
         pm5Engine.reset()
         clearPassthroughActivity()
+        replayEngine?.reset()
+        publishReplayCount(0)
         publishDeviceState()
     }
 
@@ -171,7 +227,131 @@ public final class MockServer: ObservableObject {
             }
             self.transport.note("\(name.isEmpty ? peripheralId.prefix(8) : Substring(name)): \(operation)")
         }
+        bridge.recordingFileHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                self?.passthroughRecording.path = path
+            }
+        }
+        if passthroughRecordingEnabled {
+            bridge.startRecording(toDirectory: PassthroughRecordingState.directory)
+        }
         passthroughBridge = bridge
+    }
+
+    /// Starts or stops recording Passthrough traffic. A recording started
+    /// mid-session opens its file with the next message; each later client
+    /// session gets its own file. Not persisted: every launch starts off.
+    func setPassthroughRecording(_ enabled: Bool) {
+        passthroughRecording.isRecording = enabled
+        if enabled {
+            passthroughRecording.path = nil
+        }
+        transport.performOnIOQueue { [self] in
+            guard passthroughRecordingEnabled != enabled else { return }
+            passthroughRecordingEnabled = enabled
+            if enabled {
+                passthroughBridge?.startRecording(toDirectory: PassthroughRecordingState.directory)
+            } else {
+                passthroughBridge?.stopRecording()
+            }
+        }
+    }
+
+    private func prepareReplayEngine() {
+        guard replayEngine == nil else { return }
+        let engine = ReplayEngine(
+            performOnIOQueue: { [weak self] work in
+                self?.transport.performOnIOQueue(work)
+            },
+            send: { [weak self] message in
+                guard let self, self.serveMode == .replay else { return }
+                self.transport.send(message)
+            },
+            onFileOpened: { [weak self] path in
+                DispatchQueue.main.async {
+                    self?.replayRecording.path = path
+                }
+            },
+            onReceived: { [weak self] type, count in
+                self?.publishReplayCount(count)
+                self?.transport.note("Recorded \(type)")
+            }
+        )
+        engine.replaceResponder(makeReplayResponder())
+        replayEngine = engine
+    }
+
+    // MARK: - Replay script
+
+    /// Loads and validates a recording for Replay mode. A valid script takes
+    /// effect immediately: a connected client's run restarts from the first
+    /// entry. An invalid one is shown as such and Replay falls back to
+    /// recording only.
+    func loadReplayScript(from url: URL) {
+        let script: ReplayScript?
+        do {
+            let loaded = try ReplayScript.load(from: url)
+            script = loaded
+            replayScript = ReplayScriptState(url: url, validity: .valid(
+                entries: loaded.entries.count,
+                fromClient: loaded.fromClientCount,
+                toClient: loaded.toClientCount
+            ))
+        } catch {
+            script = nil
+            replayScript = ReplayScriptState(url: url, validity: .invalid(error.localizedDescription))
+        }
+        applyReplayScript(script)
+    }
+
+    func clearReplayScript() {
+        replayScript = nil
+        applyReplayScript(nil)
+    }
+
+    private func applyReplayScript(_ script: ReplayScript?) {
+        transport.performOnIOQueue { [self] in
+            activeReplayScript = script
+            replayEngine?.replaceResponder(makeReplayResponder())
+        }
+    }
+
+    /// Called on the I/O queue.
+    private func makeReplayResponder() -> ReplayResponder {
+        nextReplayRunID += 1
+        let runID = nextReplayRunID
+        // Enqueued before the responder exists, so the ID switch reaches main
+        // ahead of any status the new responder publishes.
+        DispatchQueue.main.async { [weak self] in
+            self?.replayRunID = runID
+            self?.replayRun = .idle
+        }
+        guard let script = activeReplayScript else {
+            scriptedReplayResponder = nil
+            return SilentReplayResponder()
+        }
+        let responder = ScriptedReplayResponder(script: script) { [weak self] status in
+            DispatchQueue.main.async {
+                guard let self, self.replayRunID == runID else { return }
+                self.replayRun = status
+            }
+        }
+        scriptedReplayResponder = responder
+        return responder
+    }
+
+    /// Restarts the loaded recording from its first entry for the connected
+    /// client. No-op without a client or a valid recording.
+    func restartReplay() {
+        transport.performOnIOQueue { [self] in
+            scriptedReplayResponder?.start()
+        }
+    }
+
+    private func publishReplayCount(_ count: Int) {
+        DispatchQueue.main.async { [weak self] in
+            self?.replayRecording.receivedCount = count
+        }
     }
 
     private func configurePM5Remote() {
@@ -213,8 +393,17 @@ public final class MockServer: ObservableObject {
 
         if serveMode == .passthrough {
             if pm5Engine.appMessage(msg) { return }
-            passthroughBridge?.handleMessage(msg)
-            return
+        }
+        
+        switch serveMode {
+            case .passthrough:
+                passthroughBridge?.handleMessage(msg)
+                return
+            case .replay:
+                replayEngine?.handleMessage(msg)
+                return
+            case .mock:
+                break
         }
 
         switch type {

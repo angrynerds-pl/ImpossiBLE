@@ -16,6 +16,9 @@ static dispatch_queue_t gWriteQueue;
 static CBSMessageHandler gMessageHandler;
 static CBSStateHandler gStateHandler;
 static BOOL gConnected = NO;
+static CBSMessageHandler gLocalProvider;
+static dispatch_queue_t gLocalDeliveryQueue;
+static BOOL gOpenRequested = NO;
 static BOOL gReconnectDisabled = NO;
 static NSString *gPendingDisconnectReason;
 static dispatch_source_t gReconnectTimer;
@@ -57,16 +60,21 @@ static void cbs_handle_line(NSData *line) {
     }
 }
 
+static void cbs_notify_state(BOOL connected) {
+    CBSStateHandler handler = gStateHandler;
+    if (handler) {
+        handler(connected);
+    }
+}
+
 static void cbs_set_connected(BOOL connected) {
     if (gConnected == connected) return;
     gConnected = connected;
     if (connected) {
         NSLog(@"ImpossiBLE: socket connected");
     }
-    CBSStateHandler handler = gStateHandler;
-    if (handler) {
-        handler(connected);
-    }
+    if (gLocalProvider) return;
+    cbs_notify_state(connected);
 }
 
 static void cbs_start_reader(int fd) {
@@ -127,6 +135,9 @@ static void cbs_send_hello(int fd) {
 }
 
 static int cbs_try_connect(void) {
+    if (gLocalProvider) {
+        return -1;
+    }
     if (gSockFd >= 0) {
         return gSockFd;
     }
@@ -204,6 +215,7 @@ static void cbs_cancel_reconnect_timer(void) {
 
 static void cbs_schedule_reconnect(void) {
     if (gReconnectDisabled) return;
+    if (gLocalProvider) return;
     if (gReconnectTimer) return;
     if (!gWriteQueue) {
         gWriteQueue = dispatch_queue_create("impossible.writer", DISPATCH_QUEUE_SERIAL);
@@ -236,7 +248,50 @@ void CBSConnectionSetStateHandler(CBSStateHandler handler) {
 }
 
 BOOL CBSConnectionIsConnected(void) {
-    return gConnected;
+    return gLocalProvider != nil || gConnected;
+}
+
+void CBSConnectionSetLocalProvider(CBSMessageHandler provider) {
+    if (!gWriteQueue) {
+        gWriteQueue = dispatch_queue_create("impossible.writer", DISPATCH_QUEUE_SERIAL);
+    }
+    CBSMessageHandler copied = [provider copy];
+    dispatch_sync(gWriteQueue, ^{
+        BOOL wasConnected = CBSConnectionIsConnected();
+        if (copied) {
+            if (wasConnected) {
+                cbs_notify_state(NO);
+            }
+            cbs_cancel_reconnect_timer();
+            gLocalProvider = copied;
+            if (!gLocalDeliveryQueue) {
+                gLocalDeliveryQueue = dispatch_queue_create("impossible.local", DISPATCH_QUEUE_SERIAL);
+            }
+            if (gSockFd >= 0) {
+                shutdown(gSockFd, SHUT_RDWR);
+            }
+            NSLog(@"ImpossiBLE: serving from an in-process provider; socket suspended");
+            cbs_notify_state(YES);
+        } else if (gLocalProvider) {
+            gLocalProvider = nil;
+            NSLog(@"ImpossiBLE: in-process provider detached; resuming socket");
+            cbs_notify_state(NO);
+            if (gOpenRequested && gSockFd < 0 && cbs_try_connect() < 0) {
+                cbs_schedule_reconnect();
+            }
+        }
+    });
+}
+
+void CBSConnectionDeliverLocal(NSDictionary *msg) {
+    if (!gLocalDeliveryQueue) return;
+    dispatch_async(gLocalDeliveryQueue, ^{
+        if (!gLocalProvider) return;
+        CBSMessageHandler handler = gMessageHandler;
+        if (handler) {
+            handler(msg);
+        }
+    });
 }
 
 void CBSConnectionOpen(void) {
@@ -244,6 +299,8 @@ void CBSConnectionOpen(void) {
         gWriteQueue = dispatch_queue_create("impossible.writer", DISPATCH_QUEUE_SERIAL);
     }
     dispatch_async(gWriteQueue, ^{
+        gOpenRequested = YES;
+        if (gLocalProvider) return;
         if (gReconnectDisabled) return;
         if (gSockFd >= 0) return;
         if (cbs_try_connect() < 0) {
@@ -257,6 +314,11 @@ void CBSConnectionSend(NSDictionary *msg) {
         gWriteQueue = dispatch_queue_create("impossible.writer", DISPATCH_QUEUE_SERIAL);
     }
     dispatch_async(gWriteQueue, ^{
+        CBSMessageHandler local = gLocalProvider;
+        if (local) {
+            local(msg);
+            return;
+        }
         int fd = cbs_connect();
         if (fd < 0) {
             NSLog(@"ImpossiBLE: send failed — not connected");
@@ -284,5 +346,7 @@ void CBSConnectionSetStateHandler(CBSStateHandler handler) {}
 void CBSConnectionSend(NSDictionary *msg) {}
 void CBSConnectionOpen(void) {}
 BOOL CBSConnectionIsConnected(void) { return NO; }
+void CBSConnectionSetLocalProvider(CBSMessageHandler provider) {}
+void CBSConnectionDeliverLocal(NSDictionary *msg) {}
 
 #endif
