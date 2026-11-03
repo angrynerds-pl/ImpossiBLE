@@ -92,19 +92,24 @@ public enum FontAwesome {
                 break
 
             case .replay:
-                // Small ring badge in lower-right corner (hollow counterpart
-                // of the mock dot: listening, but nothing is answered)
-                let ringSize = max(4, size * 0.3)
-                let lineWidth = max(1, size * 0.08)
-                let ring = NSBezierPath(ovalIn: NSRect(
-                    x: canvasSize.width - ringSize - 0.5 + lineWidth / 2,
-                    y: 0.5 + lineWidth / 2,
-                    width: ringSize - lineWidth,
-                    height: ringSize - lineWidth
-                ))
-                ring.lineWidth = lineWidth
-                foreground.setStroke()
-                ring.stroke()
+                // "R" badge in lower-right corner, cut out of the glyph
+                // underneath so the letter stays legible at menu bar size
+                let letter = NSAttributedString(string: "R", attributes: [
+                    .font: NSFont.systemFont(ofSize: max(7, size * 0.5), weight: .heavy),
+                    .foregroundColor: foreground,
+                ])
+                let letterSize = letter.size()
+                let origin = NSPoint(x: canvasSize.width - letterSize.width, y: -letterSize.height * 0.12)
+                let outline = NSRect(origin: origin, size: letterSize).insetBy(dx: -0.5, dy: 0)
+                if active {
+                    NSColor.black.setFill()
+                    outline.fill()
+                } else {
+                    NSGraphicsContext.current?.compositingOperation = .clear
+                    outline.fill()
+                    NSGraphicsContext.current?.compositingOperation = .sourceOver
+                }
+                letter.draw(at: origin)
         }
 
         image.unlockFocus()

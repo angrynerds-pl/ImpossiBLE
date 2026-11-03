@@ -9,7 +9,7 @@ final class ToolsFixture {
     private let suiteName = "ImpossiBLEProviderKitTests.\(UUID().uuidString)"
     let store: MockStore
     let server = MockServer(autoStart: false)
-    let modeController = ModeTransitionController<ProviderMode>(initial: .off) { _, completion in completion() }
+    let modeController = ModeTransitionController<ImpossiBLEMode>(initial: .off) { _, completion in completion() }
     let tools: ProviderTools
 
     init() {

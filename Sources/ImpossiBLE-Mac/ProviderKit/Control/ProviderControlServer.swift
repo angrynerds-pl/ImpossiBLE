@@ -26,7 +26,7 @@ public final class ProviderControlServer: ObservableObject {
     private let tools: ProviderTools
     private let socket: ControlSocketServer
 
-    public init(store: MockStore, server: MockServer, modeController: ModeTransitionController<ProviderMode>) {
+    public init(store: MockStore, server: MockServer, modeController: ModeTransitionController<ImpossiBLEMode>) {
         let tools = ProviderTools(store: store, server: server, modeController: modeController)
         self.tools = tools
         socket = ControlSocketServer(path: Self.socketPath) { send in

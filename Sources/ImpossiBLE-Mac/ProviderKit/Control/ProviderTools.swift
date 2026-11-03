@@ -42,7 +42,7 @@ struct ToolDefinition {
 final class ProviderTools {
     private let store: MockStore
     private let server: MockServer
-    private let modeController: ModeTransitionController<ProviderMode>
+    private let modeController: ModeTransitionController<ImpossiBLEMode>
     /// Separate from the capture window's session, like that one is separate
     /// from the serving bridge: an agent recording never disturbs either.
     private lazy var capture = CaptureSession()
@@ -50,7 +50,7 @@ final class ProviderTools {
 
     private static let modeSwitchTimeout: TimeInterval = 15
 
-    init(store: MockStore, server: MockServer, modeController: ModeTransitionController<ProviderMode>) {
+    init(store: MockStore, server: MockServer, modeController: ModeTransitionController<ImpossiBLEMode>) {
         self.store = store
         self.server = server
         self.modeController = modeController
@@ -159,11 +159,11 @@ final class ProviderTools {
             description: """
                 Switch the provider mode. off: CoreBluetooth in the simulator reports poweredOff. mock: serves \
                 the virtual devices of the working set. passthrough: forwards to the Mac's real Bluetooth \
-                hardware. Switching disconnects the simulator app briefly (it reconnects automatically). \
+                hardware. replay: plays back the recording loaded in the panel (and records the app's traffic). Switching disconnects the simulator app briefly (it reconnects automatically). \
                 Waits until the switch completes and returns the new status.
                 """,
             inputSchema: schema([
-                "mode": ["type": "string", "enum": ProviderMode.allCases.map(\.rawValue)],
+                "mode": ["type": "string", "enum": ImpossiBLEMode.allCases.map(\.rawValue)],
             ], required: ["mode"]),
             readOnly: false,
             destructive: false,
@@ -841,8 +841,8 @@ final class ProviderTools {
     }
 
     private func setMode(_ args: [String: Any], completion: @escaping ToolCompletion) {
-        guard let raw = args["mode"] as? String, let target = ProviderMode(rawValue: raw.lowercased()) else {
-            completion(.failure(ToolError("mode must be one of: off, mock, passthrough")))
+        guard let raw = args["mode"] as? String, let target = ImpossiBLEMode(rawValue: raw.lowercased()) else {
+            completion(.failure(ToolError("mode must be one of: \(ImpossiBLEMode.allCases.map(\.rawValue).joined(separator: ", "))")))
             return
         }
         // Re-selecting the current mode would bounce the server and drop the
