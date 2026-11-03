@@ -59,6 +59,15 @@ BOOL ImpossiBLEIsProviderConnected(void);
 /// sets up and starts that replay when the library loads.
 BOOL ImpossiBLESetupReplay(NSString *path, NSError * _Nullable * _Nullable error);
 
+/// Darwin notification that restarts a replay started from
+/// `IMPOSSIBLE_REPLAY_RECORDING`: the recording moves back to its first entry
+/// and plays from there, as `ImpossiBLEStartReplay` does; the app's Bluetooth
+/// state is left alone. Post it from a UI test, which runs in another
+/// process, with `CFNotificationCenterPostNotification` on the Darwin notify
+/// center. Replays set up through `ImpossiBLESetupReplay` ignore it; call
+/// `ImpossiBLEStartReplay` instead.
+extern NSString *const ImpossiBLEReplayRestartNotification;
+
 /// Starts playing the recording, entries in `seq` order, waiting each entry's
 /// recorded time distance from the previous one: `toClient` messages are
 /// delivered as if from a peripheral, and each `fromClient` entry waits for

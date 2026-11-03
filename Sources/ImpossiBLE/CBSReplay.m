@@ -12,6 +12,8 @@
 
 static NSString *const kCBSReplayErrorDomain = @"ImpossiBLE";
 
+NSString *const ImpossiBLEReplayRestartNotification = @"com.impossible.replay.restart";
+
 #if TARGET_OS_SIMULATOR
 
 static const NSTimeInterval kCBSReplayFromClientTimeout = 60;
@@ -456,6 +458,19 @@ void ImpossiBLESetReplayStatusHandler(ImpossiBLEReplayStatusHandler handler)
     gStatusHandler = [handler copy];
 }
 
+/// Moves the replay back to its first entry and plays it from there; nothing
+/// else about the app's Bluetooth state changes.
+static void CBSReplayRestart(CFNotificationCenterRef center, void *observer, CFNotificationName name,
+                             const void *object, CFDictionaryRef userInfo)
+{
+    NSError *error = nil;
+    if (!ImpossiBLEStartReplay(&error)) {
+        NSLog(@"ImpossiBLE: replay restart failed: %@", error.localizedDescription);
+        return;
+    }
+    NSLog(@"ImpossiBLE: replay restarted (%@)", (__bridge NSString *)name);
+}
+
 void CBSReplayStartFromEnvironment(void)
 {
     NSString *path = NSProcessInfo.processInfo.environment[@"IMPOSSIBLE_REPLAY_RECORDING"];
@@ -466,6 +481,11 @@ void CBSReplayStartFromEnvironment(void)
         NSLog(@"ImpossiBLE: replay from IMPOSSIBLE_REPLAY_RECORDING failed: %@", error.localizedDescription);
         return;
     }
+    // A UI test runs in another process and cannot call into this one; a Darwin
+    // notification is the one signal it can send the app without its help.
+    CFNotificationCenterAddObserver(CFNotificationCenterGetDarwinNotifyCenter(), NULL, CBSReplayRestart,
+                                    (__bridge CFStringRef)ImpossiBLEReplayRestartNotification, NULL,
+                                    CFNotificationSuspensionBehaviorDeliverImmediately);
     NSLog(@"ImpossiBLE: replaying %@ (from IMPOSSIBLE_REPLAY_RECORDING)", path);
 }
 
