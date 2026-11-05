@@ -1012,6 +1012,7 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
 
 - (void)centralManager:(CBCentralManager *)central didDisconnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
     [self cancelPendingL2capOpenForPeripheralId:peripheral.identifier];
+    [self clearTransientStateForPeripheral:peripheral];
     [self sendDisconnectForPeripheral:peripheral
                             timestamp:CFAbsoluteTimeGetCurrent()
                        isReconnecting:NO
@@ -1024,6 +1025,7 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
          isReconnecting:(BOOL)isReconnecting
                   error:(NSError *)error API_AVAILABLE(ios(17.0), macos(14.0)) {
     [self cancelPendingL2capOpenForPeripheralId:peripheral.identifier];
+    [self clearTransientStateForPeripheral:peripheral];
     [self sendDisconnectForPeripheral:peripheral
                             timestamp:timestamp
                        isReconnecting:isReconnecting
@@ -1346,6 +1348,20 @@ connectionEventDidOccur:(CBConnectionEvent)event
         @"id": peripheral.identifier.UUIDString,
         @"serviceIds": payload
     }];
+}
+
+/// Drops writes still queued for a link that is gone, and read counters that
+/// would misclassify the next notification on a reconnected link. Runs on cbQueue.
+- (void)clearTransientStateForPeripheral:(CBPeripheral *)peripheral {
+    if (!peripheral.identifier) {
+        return;
+    }
+    [self.queuedWritesWithoutResponse removeObjectForKey:peripheral.identifier];
+    for (NSString *chId in [self.pendingReadCounts allKeys]) {
+        if ([self.characteristicsById[chId].service.peripheral.identifier isEqual:peripheral.identifier]) {
+            [self.pendingReadCounts removeObjectForKey:chId];
+        }
+    }
 }
 
 - (void)drainWritesWithoutResponseForPeripheral:(CBPeripheral *)peripheral {
