@@ -221,9 +221,10 @@ public final class MockServer: ObservableObject {
         currentClient = client
         isClientConnected = true
         tearDownClientState()
-        let isRelayClient = client.map { $0.pid > 0 && $0.pid == relayPid.withLock { $0 } } ?? false
+        let isRelayClient = Self.isRelayClient(client, relayPid: relayPid.withLock { $0 })
         completesWritesWithoutResponse = isRelayClient
         passthroughBridge?.reportsWriteWithoutResponseCompletion = isRelayClient
+        pm5Engine?.bridgeAcksWriteWithoutResponse = isRelayClient
         if serveMode == .replay {
             replayEngine?.begin()
         }
@@ -278,6 +279,7 @@ public final class MockServer: ObservableObject {
         if passthroughRecordingEnabled {
             bridge.startRecording(toDirectory: PassthroughRecordingState.directory)
         }
+        bridge.reportsWriteWithoutResponseCompletion = completesWritesWithoutResponse
         passthroughBridge = bridge
     }
 
@@ -878,16 +880,29 @@ public final class MockServer: ObservableObject {
         activityLog.append(kind, deviceID: peripheralUUID, serviceUUID: String(parts[1]),
                            characteristicUUID: String(parts[3]), value: written)
 
-        if writeType == 0 || completesWritesWithoutResponse {
-            var reply: [String: Any] = [
-                "type": "didWriteValue",
-                "id": peripheralUUID,
-                "characteristicId": charId,
-                "error": "",
-            ]
-            if writeType != 0 { reply["writeType"] = writeType }
+        if let reply = Self.writeCompletionReply(peripheralUUID: peripheralUUID, charId: charId, writeType: writeType,
+                                                 completesWritesWithoutResponse: completesWritesWithoutResponse) {
             transport.send(reply)
         }
+    }
+
+    /// iOS never gets a reply for a write without response; the relay client does.
+    static func writeCompletionReply(peripheralUUID: String, charId: String, writeType: Int,
+                                     completesWritesWithoutResponse: Bool) -> [String: Any]? {
+        guard writeType == 0 || completesWritesWithoutResponse else { return nil }
+        var reply: [String: Any] = [
+            "type": "didWriteValue",
+            "id": peripheralUUID,
+            "characteristicId": charId,
+            "error": "",
+        ]
+        if writeType != 0 { reply["writeType"] = writeType }
+        return reply
+    }
+
+    static func isRelayClient(_ client: SocketClientInfo?, relayPid: pid_t?) -> Bool {
+        guard let client, client.pid > 0 else { return false }
+        return client.pid == relayPid
     }
 
     private func handleReadDescriptor(_ msg: [String: Any]) {

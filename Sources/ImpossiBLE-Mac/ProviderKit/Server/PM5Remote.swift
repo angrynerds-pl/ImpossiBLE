@@ -475,8 +475,13 @@ final class PM5RemoteEngine {
     static let staleReplyAge: TimeInterval = 1.5
 
     var isEnabled = false
+    /// Set when the bridge reports a `didWriteValue` for every write without
+    /// response (the relay client's session). Those acks answer our own
+    /// injected writes too and must not reach the app.
+    var bridgeAcksWriteWithoutResponse = false
 
     private var peripherals: [String: Peripheral] = [:]
+    private var unconsumedWriteAcks: [String: Int] = [:]
     private var names: [String: String] = [:]
     private var queue: [PM5Injection] = []
     private var active: Active?
@@ -594,6 +599,7 @@ final class PM5RemoteEngine {
         }
         failQueued(ToolError("The passthrough connection was reset"))
         peripherals.removeAll()
+        unconsumedWriteAcks.removeAll()
         publishConnections()
     }
 
@@ -658,6 +664,9 @@ final class PM5RemoteEngine {
             token: token
         )
         note("PM5 remote: \(injection.label)")
+        if injection.writeWithoutResponse && bridgeAcksWriteWithoutResponse {
+            unconsumedWriteAcks[peripheral.commandCharacteristicID!, default: 0] += chunks.count
+        }
         for chunk in chunks {
             record("remote→pm", chunk, injection.label)
             sendToBridge([
@@ -680,6 +689,11 @@ final class PM5RemoteEngine {
     }
 
     private func consumeWriteConfirmation(_ message: [String: Any], peripheralID: String) -> Bool {
+        if message["writeType"] as? Int == 1, let characteristicID = message["characteristicId"] as? String,
+           let remaining = unconsumedWriteAcks[characteristicID], remaining > 0 {
+            unconsumedWriteAcks[characteristicID] = remaining == 1 ? nil : remaining - 1
+            return true
+        }
         guard var current = active, current.peripheralID == peripheralID,
               message["characteristicId"] as? String == current.commandCharacteristicID,
               current.pendingWriteConfirmations > 0
