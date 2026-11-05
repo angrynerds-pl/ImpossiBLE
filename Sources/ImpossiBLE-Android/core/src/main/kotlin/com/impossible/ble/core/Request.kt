@@ -41,7 +41,7 @@ class Request<D> internal constructor(
     private var failCallback: ((D, Int) -> Unit)? = null
     private var invalidCallback: (() -> Unit)? = null
     private var thenCallback: ((D) -> Unit)? = null
-    private var timeoutMs = DEFAULT_TIMEOUT_MS
+    private var timeoutMs: Long? = null
     internal var forInit = false
     internal var retryCount = 0
         private set
@@ -67,6 +67,8 @@ class Request<D> internal constructor(
         retryDelayMs = delayMs
     }
 
+    val awaitCeilingMs: Long get() = queue.awaitCeilingMs
+
     fun clearTimeout() {
         timer?.cancel(false)
     }
@@ -89,7 +91,7 @@ class Request<D> internal constructor(
         failCallback = { _, s -> status.set(s); latch.countDown() }
         invalidCallback = { status.set(Reason.REQUEST_INVALID); latch.countDown() }
         enqueue()
-        latch.await()
+        if (!latch.await(queue.awaitCeilingMs, TimeUnit.MILLISECONDS)) throw RequestFailedException(Reason.TIMEOUT)
         when (val s = status.get()) {
             0 -> Unit
             Reason.DEVICE_DISCONNECTED -> throw DeviceDisconnectedException()
@@ -100,7 +102,8 @@ class Request<D> internal constructor(
     }
 
     internal fun start() {
-        if (timeoutMs > 0) timer = queue.scheduler.schedule({ failWith(Reason.TIMEOUT) }, timeoutMs, TimeUnit.MILLISECONDS)
+        val limit = timeoutMs ?: queue.defaultTimeoutMs
+        if (limit > 0) timer = queue.scheduler.schedule({ failWith(Reason.TIMEOUT) }, limit, TimeUnit.MILLISECONDS)
         operation(this)
     }
 
@@ -137,21 +140,25 @@ class Request<D> internal constructor(
             return
         }
     }
-
-    private companion object {
-        const val DEFAULT_TIMEOUT_MS = 5_000L
-    }
 }
 
-class RequestQueue(internal val scheduler: ScheduledExecutorService, internal val callbacks: Executor) {
+class RequestQueue(
+    internal val scheduler: ScheduledExecutorService,
+    internal val callbacks: Executor,
+    internal val defaultTimeoutMs: Long = Session.DEFAULT_REQUEST_TIMEOUT_MS,
+    internal val awaitCeilingMs: Long = AWAIT_CEILING_MS,
+) {
     private val waiting = ArrayDeque<Request<*>>()
     private val initWaiting = ArrayDeque<Request<*>>()
     private var current: Request<*>? = null
     private var holdTasks = false
     private var drained: (() -> Unit)? = null
 
-    @Volatile
-    var initCapture = false
+    private val capture = ThreadLocal<Boolean>()
+
+    var initCapture: Boolean
+        get() = capture.get() == true
+        set(value) = capture.set(value)
 
     fun <D> request(device: D, queued: Boolean, operation: (Request<D>) -> Unit) = Request(device, this, queued, operation)
 
@@ -187,12 +194,12 @@ class RequestQueue(internal val scheduler: ScheduledExecutorService, internal va
     }
 
     internal fun abortNow() {
-        val inFlight = current
+        val dropped = listOfNotNull(current) + initWaiting + waiting
         waiting.clear()
         initWaiting.clear()
         holdTasks = false
         drained = null
-        inFlight?.failWith(Reason.DEVICE_DISCONNECTED)
+        dropped.forEach { it.failWith(Reason.DEVICE_DISCONNECTED) }
     }
 
     private fun pump() {
@@ -208,3 +215,5 @@ class RequestQueue(internal val scheduler: ScheduledExecutorService, internal va
         next.start()
     }
 }
+
+private const val AWAIT_CEILING_MS = 120_000L

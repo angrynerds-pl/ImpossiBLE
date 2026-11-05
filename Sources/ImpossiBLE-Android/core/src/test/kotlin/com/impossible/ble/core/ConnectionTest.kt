@@ -10,7 +10,11 @@ import java.util.concurrent.Executors
 
 class ConnectionTest {
 
-    private val server = ServerSocket(0, 1, java.net.InetAddress.getLoopbackAddress())
+    private val server = ServerSocket().apply {
+        receiveBufferSize = SMALL_BUFFER
+        bind(java.net.InetSocketAddress(java.net.InetAddress.getLoopbackAddress(), 0), 1)
+    }
+    private val silentCloses = java.util.concurrent.atomic.AtomicInteger()
     private val scheduler = Executors.newSingleThreadScheduledExecutor()
     private val states = CopyOnWriteArrayList<ConnectionState>()
     private val messages = CopyOnWriteArrayList<Incoming>()
@@ -19,8 +23,9 @@ class ConnectionTest {
         object : ConnectionListener {
             override fun onState(state: ConnectionState) { states += state }
             override fun onMessage(message: Incoming) { messages += message }
+            override fun onClosedWithoutReply() { silentCloses.incrementAndGet() }
         },
-        minBackoffMs = 20, maxBackoffMs = 80,
+        minBackoffMs = 20, maxBackoffMs = 80, writeStallMs = 300, watchdogTickMs = 50,
     )
 
     @After
@@ -111,5 +116,66 @@ class ConnectionTest {
         s.close()
         server.soTimeout = 300
         assertThat(runCatching { server.accept() }.isFailure).isTrue()
+    }
+
+    @Test
+    fun `given a server that never reads, then send never blocks and the stalled socket is closed and reconnected`() {
+        connection.start()
+        val stalled = accept()
+        await { ConnectionState.Connected in states }
+        val big = "x".repeat(BIG_LINE)
+        var slowest = 0L
+        val deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+        while (states.count { it == ConnectionState.Disconnected } == 0 && System.nanoTime() < deadline) {
+            val t0 = System.nanoTime()
+            connection.send(big)
+            slowest = maxOf(slowest, System.nanoTime() - t0)
+            Thread.sleep(2)
+        }
+        assertThat(ConnectionState.Disconnected in states).isTrue()
+        assertThat(slowest).isLessThan(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(200))
+        val second = accept()
+        assertThat(second.getInputStream().bufferedReader().readLine()).contains("hello")
+        second.close()
+        stalled.close()
+    }
+
+    @Test
+    fun `given a stalled writer, then stop returns promptly`() {
+        connection.start()
+        val stalled = accept()
+        await { ConnectionState.Connected in states }
+        val big = "x".repeat(BIG_LINE)
+        repeat(200) { connection.send(big) }
+        val t0 = System.nanoTime()
+        connection.stop()
+        assertThat(System.nanoTime() - t0).isLessThan(java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(500))
+        stalled.close()
+    }
+
+    @Test
+    fun `given the server closes right after hello without replying, then the close is reported as silent`() {
+        connection.start()
+        val s = accept()
+        s.getInputStream().bufferedReader().readLine()
+        s.close()
+        await { silentCloses.get() == 1 }
+    }
+
+    @Test
+    fun `given the server replied before closing, then the close is not reported as silent`() {
+        connection.start()
+        val s = accept()
+        s.getOutputStream().write("""{"type":"didConnect","id":"a"}""".toByteArray() + "\n".toByteArray())
+        s.getOutputStream().flush()
+        await { messages.size == 1 }
+        s.close()
+        await { ConnectionState.Disconnected in states }
+        assertThat(silentCloses.get()).isEqualTo(0)
+    }
+
+    private companion object {
+        const val SMALL_BUFFER = 4096
+        const val BIG_LINE = 256 * 1024
     }
 }

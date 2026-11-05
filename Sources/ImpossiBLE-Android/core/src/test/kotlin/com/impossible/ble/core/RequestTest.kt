@@ -163,40 +163,82 @@ class RequestTest {
     }
 
     @Test
-    fun `given abort, then the in-flight request fails as disconnected and queued requests are dropped silently`() {
+    fun `given abort, then the in-flight and every queued request fail as disconnected and none starts`() {
         val inFlight = manual { }
         val queued = manual { events += "queued started" }
+        val initQueued = manual { events += "init started" }.also { it.forInit = true }
         inFlight.fail { _, s -> events += "fail$s" }
         queued.fail { _, s -> events += "queuedfail$s" }.done { events += "queueddone" }.then { events += "queuedthen" }
+        initQueued.fail { _, s -> events += "initfail$s" }
+        queued.onFinished { events += "queuedcleanup" }
         inFlight.enqueue()
+        f.drain()
+        f.scheduler.submit { f.queue.beginInit() }.get()
         queued.enqueue()
+        initQueued.enqueue()
         f.drain()
         f.queue.abort()
         f.drain()
-        assertThat(events).containsExactly("fail${Reason.DEVICE_DISCONNECTED}")
-        assertThat(queued.isFinished).isFalse()
+        assertThat(events).containsExactly(
+            "fail${Reason.DEVICE_DISCONNECTED}",
+            "queuedcleanup", "queuedfail${Reason.DEVICE_DISCONNECTED}", "queuedthen",
+            "initfail${Reason.DEVICE_DISCONNECTED}",
+        )
+        assertThat(queued.isFinished).isTrue()
+        assertThat(initQueued.isFinished).isTrue()
     }
 
     @Test
-    fun `given a queued write dropped at disconnect, when awaited, then await never returns`() {
+    fun `given a queued write dropped at disconnect, when awaited, then await throws device disconnected`() {
         manual { }.enqueue()
         val write = manual { }
+        val thrown = AtomicReference<Throwable>()
         val returned = CountDownLatch(1)
         val t = Thread {
             try {
                 write.await()
-            } catch (ignored: Exception) {
-                returned.countDown()
+            } catch (e: DeviceDisconnectedException) {
+                thrown.set(e)
             }
             returned.countDown()
         }
         t.isDaemon = true
         t.start()
+        Thread.sleep(100)
         f.drain()
         f.queue.abort()
-        f.drain()
-        assertThat(returned.await(300, TimeUnit.MILLISECONDS)).isFalse()
-        t.interrupt()
+        assertThat(returned.await(Fixture.WAIT_S, TimeUnit.SECONDS)).isTrue()
+        assertThat(thrown.get()).isInstanceOf(DeviceDisconnectedException::class.java)
+    }
+
+    @Test
+    fun `given a queue default timeout, then requests without an explicit timeout use it and explicit ones win`() {
+        val queue = RequestQueue(f.scheduler, f.callbacks, defaultTimeoutMs = 40)
+        queue.request("dev", false) { }.fail { _, s -> events += "default$s" }.enqueue()
+        queue.request("dev", false) { }.timeout(5_000).fail { _, s -> events += "explicit$s" }.enqueue()
+        f.awaitThat { events.isNotEmpty() }
+        Thread.sleep(120)
+        assertThat(events).containsExactly("default${Reason.TIMEOUT}")
+    }
+
+    @Test
+    fun `given an unbounded request, when awaited past the ceiling, then await throws a timeout failure`() {
+        val queue = RequestQueue(f.scheduler, f.callbacks, awaitCeilingMs = 100)
+        val thrown = assertThrows(RequestFailedException::class.java) { queue.request("dev", false) { }.timeout(0).await() }
+        assertThat(thrown.status).isEqualTo(Reason.TIMEOUT)
+    }
+
+    @Test
+    fun `given init capture on one thread, then a request enqueued from another thread is not an init request`() {
+        val other = AtomicReference<Boolean>()
+        f.queue.initCapture = true
+        val t = Thread { other.set(manual().enqueue().forInit) }
+        t.start()
+        t.join()
+        val mine = manual().enqueue().forInit
+        f.queue.initCapture = false
+        assertThat(other.get()).isFalse()
+        assertThat(mine).isTrue()
     }
 
     @Test

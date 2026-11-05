@@ -5,6 +5,7 @@ import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.database.Cursor
 import android.net.Uri
+import com.impossible.ble.core.Session
 
 class ImpossibleBleInitProvider : ContentProvider() {
 
@@ -16,6 +17,7 @@ class ImpossibleBleInitProvider : ContentProvider() {
             token = meta?.getString(KEY_TOKEN).orEmpty(),
             host = meta?.getString(KEY_HOST) ?: ImpossibleBle.DEFAULT_HOST,
             port = meta?.getInt(KEY_PORT, ImpossibleBle.DEFAULT_PORT) ?: ImpossibleBle.DEFAULT_PORT,
+            requestTimeoutMs = meta?.getInt(KEY_REQUEST_TIMEOUT, 0)?.takeIf { it > 0 }?.toLong() ?: Session.DEFAULT_REQUEST_TIMEOUT_MS,
         )
         return true
     }
@@ -33,6 +35,7 @@ class ImpossibleBleInitProvider : ContentProvider() {
     private companion object {
         const val KEY_HOST = "com.impossible.ble.HOST"
         const val KEY_PORT = "com.impossible.ble.PORT"
+        const val KEY_REQUEST_TIMEOUT = "com.impossible.ble.REQUEST_TIMEOUT_MS"
         const val KEY_TOKEN = "com.impossible.ble.TOKEN"
     }
 }

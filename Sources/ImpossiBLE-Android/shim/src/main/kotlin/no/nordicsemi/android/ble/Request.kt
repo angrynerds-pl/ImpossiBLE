@@ -12,6 +12,7 @@ import no.nordicsemi.android.ble.exception.DeviceDisconnectedException
 import no.nordicsemi.android.ble.exception.InvalidRequestException
 import no.nordicsemi.android.ble.exception.RequestFailedException
 import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 import com.impossible.ble.core.Request as CoreRequest
 
@@ -50,8 +51,9 @@ abstract class Request internal constructor(
         doneCallback = SuccessCallback { latch.countDown() }
         failCallback = FailCallback { _, s -> status.set(s); latch.countDown() }
         invalidCallback = InvalidRequestCallback { status.set(Reason.REQUEST_INVALID); latch.countDown() }
-        enqueue()
-        latch.await()
+        val core = build()
+        core.enqueue()
+        if (!latch.await(core.awaitCeilingMs, TimeUnit.MILLISECONDS)) throw RequestFailedException(this, Reason.TIMEOUT)
         when (val s = status.get()) {
             0 -> Unit
             Reason.DEVICE_DISCONNECTED -> throw DeviceDisconnectedException()

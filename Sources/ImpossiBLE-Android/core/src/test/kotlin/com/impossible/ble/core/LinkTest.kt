@@ -181,6 +181,34 @@ class LinkTest {
     }
 
     @Test
+    fun `given a disconnect that times out, then the link tears down locally and does not stay disconnecting`() {
+        link.connect().enqueue()
+        f.awaitThat { "connect" in sentTypes() }
+        connectAndDiscover()
+        f.awaitThat { "observerReady" in events }
+        link.disconnect().timeout(50).fail { _, s -> events += "disconnectFail $s" }.enqueue()
+        f.awaitThat { "disconnected 1" in events }
+        assertThat(events).contains("disconnectFail ${Reason.TIMEOUT}")
+        assertThat(link.isConnected).isFalse()
+        sentTypes().let { sent -> assertThat(sent.count { it == "cancel" }).isEqualTo(1) }
+        f.sent.clear()
+        link.connect().enqueue()
+        f.awaitThat { "connect" in sentTypes() }
+    }
+
+    @Test
+    fun `given a session shutdown, then queued requests fail and the scheduler stops`() {
+        val status = java.util.concurrent.atomic.AtomicInteger()
+        val queue = f.session.queueFor("x")
+        queue.request("dev", true) { }.enqueue()
+        queue.request("dev", true) { }.fail { _, s -> status.set(s) }.enqueue()
+        f.drain()
+        f.session.shutdown()
+        f.awaitThat { f.scheduler.isTerminated }
+        assertThat(status.get()).isEqualTo(Reason.DEVICE_DISCONNECTED)
+    }
+
+    @Test
     fun `given an idle link, when disconnect is requested, then it succeeds without wire traffic`() {
         var done = false
         link.disconnect().done { done = true }.enqueue()

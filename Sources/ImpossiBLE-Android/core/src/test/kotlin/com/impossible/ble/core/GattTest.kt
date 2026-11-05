@@ -184,15 +184,16 @@ class GattTest {
     }
 
     @Test
-    fun `given a queued write, when the peripheral disconnects mid-await, then the in-flight op fails and the queued write await never returns`() {
+    fun `given a queued write, when the peripheral disconnects mid-await, then the in-flight op fails and the queued write await throws device disconnected`() {
         gatt.read("c").fail { _, s -> events += "fail$s" }.enqueue()
         val write = gatt.write("c", byteArrayOf(1), true)
+        var thrown = false
         val returned = CountDownLatch(1)
         val t = Thread {
             try {
                 write.await()
-            } catch (ignored: Exception) {
-                returned.countDown()
+            } catch (ignored: DeviceDisconnectedException) {
+                thrown = true
             }
             returned.countDown()
         }
@@ -201,8 +202,8 @@ class GattTest {
         f.drain()
         f.incoming("""{"type":"didDisconnect","id":"p","error":"link"}""")
         assertThat(events).containsExactly("fail${Reason.DEVICE_DISCONNECTED}")
-        assertThat(returned.await(300, TimeUnit.MILLISECONDS)).isFalse()
-        t.interrupt()
+        assertThat(returned.await(Fixture.WAIT_S, TimeUnit.SECONDS)).isTrue()
+        assertThat(thrown).isTrue()
     }
 
     @Test

@@ -98,6 +98,7 @@ class Link<D>(
             }
             else -> {
                 localDisconnect = true
+                r.onFinished { disconnectTimedOut(r) }
                 enter(LinkState.Disconnecting)
                 pendingDisconnects += r
                 post { hooks.onDisconnecting() }
@@ -117,6 +118,12 @@ class Link<D>(
         connecting?.failWith(Reason.DEVICE_DISCONNECTED)
         pendingDisconnects.toList().forEach { it.succeed() }
         pendingDisconnects.clear()
+    }
+
+    private fun disconnectTimedOut(r: Request<D>) {
+        if (r.failureStatus != Reason.TIMEOUT || state != LinkState.Disconnecting) return
+        queue.abortNow()
+        onDisconnected("", false)
     }
 
     private fun attempt(r: Request<D>, remaining: Int) {

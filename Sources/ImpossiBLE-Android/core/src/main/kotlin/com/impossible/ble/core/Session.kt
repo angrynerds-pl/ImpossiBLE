@@ -1,5 +1,6 @@
 package com.impossible.ble.core
 
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executor
 import java.util.concurrent.ScheduledExecutorService
 
@@ -10,10 +11,11 @@ interface Peer {
 class Session(
     internal val scheduler: ScheduledExecutorService,
     internal val callbacks: Executor,
+    private val requestTimeoutMs: Long = DEFAULT_REQUEST_TIMEOUT_MS,
     private val sender: (String) -> Boolean,
 ) {
     private val notificationCallbacks = HashMap<Pair<String, String>, (ByteArray) -> Unit>()
-    private val limits = HashMap<String, DidConnect>()
+    private val limits = ConcurrentHashMap<String, DidConnect>()
     private val queues = HashMap<String, RequestQueue>()
     private val peers = HashMap<String, Peer>()
 
@@ -27,7 +29,7 @@ class Session(
 
     fun send(line: String): Boolean = sender(line)
 
-    fun queueFor(id: String): RequestQueue = synchronized(queues) { queues.getOrPut(id) { RequestQueue(scheduler, callbacks) } }
+    fun queueFor(id: String): RequestQueue = synchronized(queues) { queues.getOrPut(id) { RequestQueue(scheduler, callbacks, requestTimeoutMs) } }
 
     fun register(id: String, peer: Peer) {
         synchronized(peers) { peers[id] = peer }
@@ -66,15 +68,25 @@ class Session(
         }
     }
 
-    fun onTransportLost() {
+    fun shutdown() {
         scheduler.execute {
-            synchronized(queues) { queues.values.toList() }.forEach { it.abortNow() }
-            peerList().forEach { it.onDisconnected("", true) }
-            correlator.lost(null)
+            lose()
+            scheduler.shutdownNow()
         }
     }
 
-    private companion object {
-        const val DEFAULT_WRITE_LIMIT = 20
+    fun onTransportLost() {
+        scheduler.execute(::lose)
+    }
+
+    private fun lose() {
+        synchronized(queues) { queues.values.toList() }.forEach { it.abortNow() }
+        peerList().forEach { it.onDisconnected("", true) }
+        correlator.lost(null)
+    }
+
+    companion object {
+        const val DEFAULT_REQUEST_TIMEOUT_MS = 15_000L
+        private const val DEFAULT_WRITE_LIMIT = 20
     }
 }

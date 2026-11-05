@@ -89,6 +89,36 @@ class RequestTest {
     }
 
     @Test
+    fun `given a queued request dropped by an abort, when awaited, then it throws device disconnected and fail fires`() {
+        MainThread.isMain = { false }
+        request { }.enqueue()
+        val queued = request { }.fail { _, status -> events += "fail $status" }
+        val thrown = java.util.concurrent.atomic.AtomicReference<Throwable>()
+        val t = Thread {
+            try {
+                queued.await()
+            } catch (e: DeviceDisconnectedException) {
+                thrown.set(e)
+            }
+        }
+        t.start()
+        Thread.sleep(SETTLE_MS * 2)
+        queue.abort()
+        t.join(WAIT_NS / 1_000_000)
+        assertThat(thrown.get()).isInstanceOf(DeviceDisconnectedException::class.java)
+    }
+
+    @Test
+    fun `given a request that never completes, when awaited past the ceiling, then it throws a timeout failure`() {
+        MainThread.isMain = { false }
+        val bounded = RequestQueue(scheduler, Executor { it.run() }, awaitCeilingMs = 100)
+        val unbounded = WriteRequest("write") { bounded.request(device, false) { } }
+        unbounded.timeoutMillis = 0
+        val thrown = assertThrows(RequestFailedException::class.java) { unbounded.await() }
+        assertThat(thrown.status).isEqualTo(Reason.TIMEOUT)
+    }
+
+    @Test
     fun `given no operation behind the request, when enqueued, then it names the unsupported method`() {
         val thrown = assertThrows(UnsupportedOperationException::class.java) { WriteRequest("write", null).enqueue() }
         assertThat(thrown).hasMessageThat().isEqualTo("ImpossiBLE shim: write")

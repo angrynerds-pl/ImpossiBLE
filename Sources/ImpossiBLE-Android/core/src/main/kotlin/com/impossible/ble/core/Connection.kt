@@ -1,16 +1,20 @@
 package com.impossible.ble.core
 
 import java.io.IOException
-import java.io.OutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
+import java.net.SocketTimeoutException
 import java.util.concurrent.Executor
+import java.util.concurrent.LinkedBlockingQueue
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.TimeUnit
 
 enum class ConnectionState { Disconnected, Connecting, Connected, Rejected }
 
 interface ConnectionListener {
     fun onState(state: ConnectionState)
     fun onMessage(message: Incoming)
+    fun onClosedWithoutReply() {}
 }
 
 class Connection(
@@ -21,12 +25,24 @@ class Connection(
     private val listener: ConnectionListener,
     private val minBackoffMs: Long = 500,
     private val maxBackoffMs: Long = 5_000,
+    private val writeStallMs: Long = 10_000,
+    private val watchdogTickMs: Long = 1_000,
 ) {
-    private val lock = Any()
-    private var out: OutputStream? = null
-    private var socket: Socket? = null
+    private class Active(val socket: Socket) {
+        val lines = LinkedBlockingQueue<String>(QUEUE_CAPACITY)
+
+        @Volatile
+        var writeStartedNs = 0L
+
+        @Volatile
+        var received = false
+    }
+
     private var thread: Thread? = null
     private var lastState: ConnectionState? = null
+
+    @Volatile
+    private var active: Active? = null
 
     @Volatile
     private var stopped = false
@@ -40,20 +56,12 @@ class Connection(
 
     fun stop() {
         stopped = true
-        synchronized(lock) { socket?.close() }
+        active?.socket?.closeQuietly()
         thread?.interrupt()
     }
 
-    fun send(line: String): Boolean = synchronized(lock) {
-        val stream = out ?: return false
-        try {
-            stream.write((line + "\n").toByteArray(Charsets.UTF_8))
-            stream.flush()
-            true
-        } catch (ignored: IOException) {
-            false
-        }
-    }
+    // ponytail: writes are queued to a per-socket writer thread, so send() never blocks; false means not connected or the queue is full
+    fun send(line: String): Boolean = active?.lines?.offer(line) == true
 
     private fun run() {
         var backoff = minBackoffMs
@@ -78,39 +86,75 @@ class Connection(
     private fun open(): Socket? = try {
         Socket().also {
             it.tcpNoDelay = true
+            it.keepAlive = true
             it.connect(InetSocketAddress(host, port), CONNECT_TIMEOUT_MS)
+            it.soTimeout = watchdogTickMs.toInt()
         }
     } catch (ignored: IOException) {
         null
     }
 
     private fun serve(s: Socket): Boolean {
-        synchronized(lock) {
-            socket = s
-            out = s.getOutputStream()
-        }
+        val a = Active(s)
+        val writer = Thread({ writeLoop(a) }, "impossible-ble-writer").apply { isDaemon = true }
+        a.lines.offer(hello)
+        active = a
+        writer.start()
         var rejected = false
         try {
-            if (!send(hello)) return false
             post(ConnectionState.Connected)
             val framer = LineFramer()
             val buffer = ByteArray(BUFFER_BYTES)
             val input = s.getInputStream()
-            while (!rejected) {
-                val n = input.read(buffer)
-                if (n < 0) break
+            var n = readChunk(a, input, buffer)
+            while (n >= 0 && !rejected) {
+                a.received = true
                 rejected = framer.feed(buffer, n).any { forward(Wire.decode(it)) }
+                if (!rejected) n = readChunk(a, input, buffer)
             }
         } catch (ignored: IOException) {
             return false
         } finally {
-            synchronized(lock) {
-                out = null
-                socket = null
-            }
-            s.close()
+            active = null
+            writer.interrupt()
+            s.closeQuietly()
+            if (!a.received && !rejected && !stopped) post { listener.onClosedWithoutReply() }
         }
         return rejected
+    }
+
+    private fun readChunk(a: Active, input: java.io.InputStream, buffer: ByteArray): Int {
+        var n = TICK
+        while (n == TICK) {
+            n = try {
+                input.read(buffer)
+            } catch (ignored: SocketTimeoutException) {
+                if (stalled(a)) -1 else TICK
+            }
+        }
+        return n
+    }
+
+    private fun stalled(a: Active): Boolean {
+        val started = a.writeStartedNs
+        return started != 0L && System.nanoTime() - started > TimeUnit.MILLISECONDS.toNanos(writeStallMs)
+    }
+
+    private fun writeLoop(a: Active) {
+        try {
+            val out = a.socket.getOutputStream()
+            while (true) {
+                val line = a.lines.take()
+                a.writeStartedNs = System.nanoTime()
+                out.write((line + "\n").toByteArray(Charsets.UTF_8))
+                out.flush()
+                a.writeStartedNs = 0L
+            }
+        } catch (ignored: IOException) {
+            a.socket.closeQuietly()
+        } catch (ignored: InterruptedException) {
+            return
+        }
     }
 
     private fun forward(message: Incoming): Boolean {
@@ -118,18 +162,37 @@ class Connection(
             post(ConnectionState.Rejected)
             return true
         }
-        events.execute { listener.onMessage(message) }
+        post { listener.onMessage(message) }
         return false
     }
 
     private fun post(state: ConnectionState) {
         if (state == lastState) return
         lastState = state
-        events.execute { listener.onState(state) }
+        post { listener.onState(state) }
+    }
+
+    private fun post(block: () -> Unit) {
+        if (stopped) return
+        try {
+            events.execute(block)
+        } catch (ignored: RejectedExecutionException) {
+            return
+        }
+    }
+
+    private fun Socket.closeQuietly() {
+        try {
+            close()
+        } catch (ignored: IOException) {
+            return
+        }
     }
 
     private companion object {
         const val CONNECT_TIMEOUT_MS = 3_000
         const val BUFFER_BYTES = 8 * 1024
+        const val QUEUE_CAPACITY = 1024
+        const val TICK = -2
     }
 }
