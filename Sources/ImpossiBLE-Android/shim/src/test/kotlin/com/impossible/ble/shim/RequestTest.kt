@@ -102,7 +102,7 @@ class RequestTest {
             }
         }
         t.start()
-        Thread.sleep(SETTLE_MS * 2)
+        waitFor { queue.queuedCount() == 2 }
         queue.abort()
         t.join(WAIT_NS / 1_000_000)
         assertThat(thrown.get()).isInstanceOf(DeviceDisconnectedException::class.java)

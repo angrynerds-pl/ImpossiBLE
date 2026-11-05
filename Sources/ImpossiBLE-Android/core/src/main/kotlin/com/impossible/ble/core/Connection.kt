@@ -8,6 +8,8 @@ import java.util.concurrent.Executor
 import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 
 enum class ConnectionState { Disconnected, Connecting, Connected, Rejected }
 
@@ -15,6 +17,7 @@ interface ConnectionListener {
     fun onState(state: ConnectionState)
     fun onMessage(message: Incoming)
     fun onClosedWithoutReply() {}
+    fun onSendDropped(queueFull: Boolean, dropped: Int) {}
 }
 
 class Connection(
@@ -27,6 +30,7 @@ class Connection(
     private val maxBackoffMs: Long = 5_000,
     private val writeStallMs: Long = 10_000,
     private val watchdogTickMs: Long = 1_000,
+    private val afterOpen: () -> Unit = {},
 ) {
     private class Active(val socket: Socket) {
         val lines = LinkedBlockingQueue<String>(QUEUE_CAPACITY)
@@ -47,6 +51,9 @@ class Connection(
     @Volatile
     private var stopped = false
 
+    private val dropped = AtomicInteger()
+    private val lastDropReportNs = AtomicLong(System.nanoTime() - DROP_REPORT_NS)
+
     fun start() {
         thread = Thread(::run, "impossible-ble-connection").apply {
             isDaemon = true
@@ -61,13 +68,29 @@ class Connection(
     }
 
     // ponytail: writes are queued to a per-socket writer thread, so send() never blocks; false means not connected or the queue is full
-    fun send(line: String): Boolean = active?.lines?.offer(line) == true
+    fun send(line: String): Boolean {
+        val a = active
+        val accepted = a?.lines?.offer(line) == true
+        if (!accepted) noteDrop(queueFull = a != null)
+        return accepted
+    }
+
+    private fun noteDrop(queueFull: Boolean) {
+        dropped.incrementAndGet()
+        val now = System.nanoTime()
+        val last = lastDropReportNs.get()
+        if (now - last >= DROP_REPORT_NS && lastDropReportNs.compareAndSet(last, now)) {
+            val count = dropped.getAndSet(0)
+            post { listener.onSendDropped(queueFull, count) }
+        }
+    }
 
     private fun run() {
         var backoff = minBackoffMs
         while (!stopped) {
             post(ConnectionState.Connecting)
             val connected = open()
+            if (connected != null) afterOpen()
             if (connected != null) {
                 backoff = minBackoffMs
                 if (serve(connected)) return
@@ -99,6 +122,11 @@ class Connection(
         val writer = Thread({ writeLoop(a) }, "impossible-ble-writer").apply { isDaemon = true }
         a.lines.offer(hello)
         active = a
+        if (stopped) {
+            active = null
+            s.closeQuietly()
+            return false
+        }
         writer.start()
         var rejected = false
         try {
@@ -129,7 +157,7 @@ class Connection(
             n = try {
                 input.read(buffer)
             } catch (ignored: SocketTimeoutException) {
-                if (stalled(a)) -1 else TICK
+                if (stopped || stalled(a)) -1 else TICK
             }
         }
         return n
@@ -194,5 +222,6 @@ class Connection(
         const val BUFFER_BYTES = 8 * 1024
         const val QUEUE_CAPACITY = 1024
         const val TICK = -2
+        val DROP_REPORT_NS = TimeUnit.SECONDS.toNanos(1)
     }
 }

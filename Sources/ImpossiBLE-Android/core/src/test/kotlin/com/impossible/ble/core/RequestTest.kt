@@ -204,8 +204,7 @@ class RequestTest {
         }
         t.isDaemon = true
         t.start()
-        Thread.sleep(100)
-        f.drain()
+        f.awaitThat { f.queue.queuedCount() == 2 }
         f.queue.abort()
         assertThat(returned.await(Fixture.WAIT_S, TimeUnit.SECONDS)).isTrue()
         assertThat(thrown.get()).isInstanceOf(DeviceDisconnectedException::class.java)
@@ -226,6 +225,37 @@ class RequestTest {
         val queue = RequestQueue(f.scheduler, f.callbacks, awaitCeilingMs = 100)
         val thrown = assertThrows(RequestFailedException::class.java) { queue.request("dev", false) { }.timeout(0).await() }
         assertThat(thrown.status).isEqualTo(Reason.TIMEOUT)
+    }
+
+    @Test
+    fun `given a longer explicit request timeout, when awaited, then the request timeout fires before the ceiling`() {
+        val queue = RequestQueue(f.scheduler, f.callbacks, awaitCeilingMs = 100, awaitMarginMs = 400)
+        val t0 = System.nanoTime()
+        val thrown = assertThrows(RequestFailedException::class.java) { queue.request("dev", false) { }.timeout(300).await() }
+        assertThat(thrown.status).isEqualTo(Reason.TIMEOUT)
+        assertThat(System.nanoTime() - t0).isAtLeast(TimeUnit.MILLISECONDS.toNanos(290))
+    }
+
+    @Test
+    fun `given the ceiling throws for a queued request, then the request is cancelled and never starts`() {
+        val queue = RequestQueue(f.scheduler, f.callbacks, awaitCeilingMs = 100)
+        val started = mutableListOf<String>()
+        val head = queue.request("dev", true) { started += "head" }.enqueue()
+        val waiting = queue.request("dev", true) { started += "waiting" }.timeout(0)
+        assertThrows(RequestFailedException::class.java) { waiting.await() }
+        f.awaitThat { waiting.isFinished }
+        f.scheduler.submit { head.succeed() }.get()
+        f.drain()
+        assertThat(started).containsExactly("head")
+    }
+
+    @Test
+    fun `given the scheduler is shut down, when a request is enqueued, then it fails as disconnected instead of throwing`() {
+        f.scheduler.shutdownNow()
+        f.queue.request("dev", true) { }.fail { _, s -> events += "fail$s" }.enqueue()
+        assertThat(events).containsExactly("fail${Reason.DEVICE_DISCONNECTED}")
+        val thrown = assertThrows(DeviceDisconnectedException::class.java) { f.queue.request("dev", false) { }.await() }
+        assertThat(thrown).isNotNull()
     }
 
     @Test

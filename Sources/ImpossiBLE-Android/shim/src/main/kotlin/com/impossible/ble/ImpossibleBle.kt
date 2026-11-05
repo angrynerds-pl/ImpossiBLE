@@ -62,7 +62,15 @@ object ImpossibleBle {
             override fun onMessage(message: Incoming) = session.onMessage(message)
 
             override fun onClosedWithoutReply() {
-                Log.w(TAG, "relay closed the connection without replying to hello; the token is probably wrong or stale")
+                Log.w(
+                    TAG,
+                    "relay closed the connection without replying to hello; the token is probably wrong or stale, " +
+                        "or the provider is not running (the relay closes silently when /tmp/impossible.sock is unreachable)",
+                )
+            }
+
+            override fun onSendDropped(queueFull: Boolean, dropped: Int) {
+                Log.w(TAG, "dropped $dropped outgoing message(s): " + if (queueFull) "send queue full" else "not connected to the relay")
             }
         }
         connection = Connection(host, port, Wire.hello(Wire.CLIENT_VERSION, bundleId, token), scheduler, listener)

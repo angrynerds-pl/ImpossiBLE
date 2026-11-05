@@ -45,21 +45,21 @@ class GattTest {
 
     @Test
     fun `given didFailConnect, then connect await throws DeviceDisconnectedException`() {
-        val t = Thread { Thread.sleep(50); f.incoming("""{"type":"didFailConnect","id":"p","error":"x"}""") }
+        val t = Thread { f.awaitThat { f.sent.isNotEmpty() }; f.incoming("""{"type":"didFailConnect","id":"p","error":"x"}""") }
         t.start()
         assertThrows(DeviceDisconnectedException::class.java) { gatt.connect().await() }
     }
 
     @Test
     fun `given connect awaited, when the peripheral disconnects mid-await, then await throws DeviceDisconnectedException`() {
-        val t = Thread { Thread.sleep(50); f.incoming("""{"type":"didDisconnect","id":"p","error":"link"}""") }
+        val t = Thread { f.awaitThat { f.sent.isNotEmpty() }; f.incoming("""{"type":"didDisconnect","id":"p","error":"link"}""") }
         t.start()
         assertThrows(DeviceDisconnectedException::class.java) { gatt.connect().await() }
     }
 
     @Test
     fun `given connect awaited, when the transport drops mid-await, then await throws DeviceDisconnectedException`() {
-        val t = Thread { Thread.sleep(50); f.session.onTransportLost(); f.drain() }
+        val t = Thread { f.awaitThat { f.sent.isNotEmpty() }; f.session.onTransportLost(); f.drain() }
         t.start()
         assertThrows(DeviceDisconnectedException::class.java) { gatt.connect().await() }
     }
@@ -199,7 +199,7 @@ class GattTest {
         }
         t.isDaemon = true
         t.start()
-        f.drain()
+        f.awaitThat { f.session.queueFor("p").queuedCount() == 2 }
         f.incoming("""{"type":"didDisconnect","id":"p","error":"link"}""")
         assertThat(events).containsExactly("fail${Reason.DEVICE_DISCONNECTED}")
         assertThat(returned.await(Fixture.WAIT_S, TimeUnit.SECONDS)).isTrue()

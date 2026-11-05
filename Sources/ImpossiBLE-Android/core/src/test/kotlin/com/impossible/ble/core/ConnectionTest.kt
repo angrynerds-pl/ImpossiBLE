@@ -174,7 +174,82 @@ class ConnectionTest {
         assertThat(silentCloses.get()).isEqualTo(0)
     }
 
+    @Test
+    fun `given stop lands between open and publish, then the socket is closed and no hello is sent`() {
+        val opened = java.util.concurrent.CountDownLatch(1)
+        val release = java.util.concurrent.CountDownLatch(1)
+        val racing = Connection(
+            "127.0.0.1", server.localPort, Wire.hello("1", "b", "t"), scheduler,
+            object : ConnectionListener {
+                override fun onState(state: ConnectionState) { states += state }
+                override fun onMessage(message: Incoming) { messages += message }
+            },
+            watchdogTickMs = 50,
+            afterOpen = {
+                opened.countDown()
+                var done = false
+                while (!done) {
+                    try {
+                        release.await()
+                        done = true
+                    } catch (ignored: InterruptedException) {
+                        done = false
+                    }
+                }
+            },
+        )
+        racing.start()
+        val s = accept()
+        assertThat(opened.await(5, java.util.concurrent.TimeUnit.SECONDS)).isTrue()
+        racing.stop()
+        release.countDown()
+        assertThat(s.getInputStream().read()).isEqualTo(-1)
+        assertThat(ConnectionState.Connected in states).isFalse()
+    }
+
+    @Test
+    fun `given the send queue is full, then send returns false and the drop is reported once`() {
+        val drops = CopyOnWriteArrayList<Pair<Boolean, Int>>()
+        val patient = Connection(
+            "127.0.0.1", server.localPort, Wire.hello("1", "b", "t"), scheduler,
+            object : ConnectionListener {
+                override fun onState(state: ConnectionState) { states += state }
+                override fun onMessage(message: Incoming) { messages += message }
+                override fun onSendDropped(queueFull: Boolean, dropped: Int) { drops += queueFull to dropped }
+            },
+            writeStallMs = 60_000, watchdogTickMs = 50,
+        )
+        patient.start()
+        val silent = accept()
+        await { ConnectionState.Connected in states }
+        val big = "x".repeat(BIG_LINE)
+        val results = (1..QUEUE_PLUS).map { patient.send(big) }
+        assertThat(results.count { !it }).isGreaterThan(0)
+        await { drops.isNotEmpty() }
+        assertThat(drops.first().first).isTrue()
+        assertThat(drops).hasSize(1)
+        patient.stop()
+        silent.close()
+    }
+
+    @Test
+    fun `given send before connect, then the drop is reported as not connected`() {
+        val drops = CopyOnWriteArrayList<Pair<Boolean, Int>>()
+        val idle = Connection(
+            "127.0.0.1", server.localPort, "h", scheduler,
+            object : ConnectionListener {
+                override fun onState(state: ConnectionState) = Unit
+                override fun onMessage(message: Incoming) = Unit
+                override fun onSendDropped(queueFull: Boolean, dropped: Int) { drops += queueFull to dropped }
+            },
+        )
+        assertThat(idle.send("x")).isFalse()
+        await { drops.isNotEmpty() }
+        assertThat(drops.single()).isEqualTo(false to 1)
+    }
+
     private companion object {
+        const val QUEUE_PLUS = 1100
         const val SMALL_BUFFER = 4096
         const val BIG_LINE = 256 * 1024
     }

@@ -1,7 +1,9 @@
 package com.impossible.ble.core
 
+import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executor
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
@@ -91,7 +93,10 @@ class Request<D> internal constructor(
         failCallback = { _, s -> status.set(s); latch.countDown() }
         invalidCallback = { status.set(Reason.REQUEST_INVALID); latch.countDown() }
         enqueue()
-        if (!latch.await(queue.awaitCeilingMs, TimeUnit.MILLISECONDS)) throw RequestFailedException(Reason.TIMEOUT)
+        if (!latch.await(queue.ceilingFor(timeoutMs), TimeUnit.MILLISECONDS)) {
+            queue.cancel(this)
+            throw RequestFailedException(Reason.TIMEOUT)
+        }
         when (val s = status.get()) {
             0 -> Unit
             Reason.DEVICE_DISCONNECTED -> throw DeviceDisconnectedException()
@@ -147,6 +152,7 @@ class RequestQueue(
     internal val callbacks: Executor,
     internal val defaultTimeoutMs: Long = Session.DEFAULT_REQUEST_TIMEOUT_MS,
     internal val awaitCeilingMs: Long = AWAIT_CEILING_MS,
+    internal val awaitMarginMs: Long = AWAIT_MARGIN_MS,
 ) {
     private val waiting = ArrayDeque<Request<*>>()
     private val initWaiting = ArrayDeque<Request<*>>()
@@ -162,16 +168,39 @@ class RequestQueue(
 
     fun <D> request(device: D, queued: Boolean, operation: (Request<D>) -> Unit) = Request(device, this, queued, operation)
 
-    internal fun submit(request: Request<*>, queued: Boolean) {
-        scheduler.execute {
-            if (queued) {
-                (if (request.forInit) initWaiting else waiting).addLast(request)
-                pump()
-            } else {
-                request.start()
+    internal fun ceilingFor(requestTimeoutMs: Long?): Long {
+        val limit = requestTimeoutMs ?: defaultTimeoutMs
+        return if (limit > 0) maxOf(awaitCeilingMs, limit + awaitMarginMs) else awaitCeilingMs
+    }
+
+    internal fun cancel(request: Request<*>) {
+        try {
+            scheduler.execute {
+                waiting.remove(request)
+                initWaiting.remove(request)
+                request.failWith(Reason.TIMEOUT)
             }
+        } catch (ignored: RejectedExecutionException) {
+            request.failWith(Reason.DEVICE_DISCONNECTED)
         }
     }
+
+    internal fun submit(request: Request<*>, queued: Boolean) {
+        try {
+            scheduler.execute {
+                if (queued) {
+                    (if (request.forInit) initWaiting else waiting).addLast(request)
+                    pump()
+                } else {
+                    request.start()
+                }
+            }
+        } catch (ignored: RejectedExecutionException) {
+            request.failWith(Reason.DEVICE_DISCONNECTED)
+        }
+    }
+
+    fun queuedCount(): Int = scheduler.submit(Callable { waiting.size + initWaiting.size + (if (current != null) 1 else 0) }).get()
 
     internal fun finished(request: Request<*>) {
         if (current === request) {
@@ -181,7 +210,11 @@ class RequestQueue(
     }
 
     fun abort() {
-        scheduler.execute { abortNow() }
+        try {
+            scheduler.execute { abortNow() }
+        } catch (ignored: RejectedExecutionException) {
+            return
+        }
     }
 
     internal fun beginInit() {
@@ -217,3 +250,4 @@ class RequestQueue(
 }
 
 private const val AWAIT_CEILING_MS = 120_000L
+private const val AWAIT_MARGIN_MS = 5_000L
