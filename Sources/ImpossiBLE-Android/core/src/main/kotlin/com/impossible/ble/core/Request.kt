@@ -42,6 +42,13 @@ class Request<D> internal constructor(
     private var invalidCallback: (() -> Unit)? = null
     private var thenCallback: ((D) -> Unit)? = null
     private var timeoutMs = DEFAULT_TIMEOUT_MS
+    internal var forInit = false
+    internal var retryCount = 0
+        private set
+    internal var retryDelayMs = 0L
+        private set
+    internal var failureStatus: Int? = null
+        private set
     private var timer: ScheduledFuture<*>? = null
     private val cleanups = mutableListOf<() -> Unit>()
 
@@ -55,7 +62,19 @@ class Request<D> internal constructor(
 
     fun timeout(millis: Long) = apply { timeoutMs = millis }
 
-    fun enqueue() = apply { queue.submit(this, queued) }
+    fun retry(count: Int, delayMs: Long) = apply {
+        retryCount = count
+        retryDelayMs = delayMs
+    }
+
+    fun clearTimeout() {
+        timer?.cancel(false)
+    }
+
+    fun enqueue() = apply {
+        forInit = queue.initCapture
+        queue.submit(this, queued)
+    }
 
     @Throws(
         RequestFailedException::class,
@@ -94,16 +113,17 @@ class Request<D> internal constructor(
         safely { thenCallback?.invoke(device) }
     }
 
-    fun failWith(status: Int) = finish { device ->
+    fun failWith(status: Int) = finish(status) { device ->
         safely { failCallback?.invoke(device, status) }
         safely { thenCallback?.invoke(device) }
     }
 
     fun invalidate() = finish { safely { invalidCallback?.invoke() } }
 
-    private fun finish(notify: (D) -> Unit) {
+    private fun finish(status: Int? = null, notify: (D) -> Unit) {
         if (isFinished) return
         isFinished = true
+        failureStatus = status
         timer?.cancel(false)
         cleanups.forEach { it() }
         queue.callbacks.execute { notify(device) }
@@ -125,14 +145,20 @@ class Request<D> internal constructor(
 
 class RequestQueue(internal val scheduler: ScheduledExecutorService, internal val callbacks: Executor) {
     private val waiting = ArrayDeque<Request<*>>()
+    private val initWaiting = ArrayDeque<Request<*>>()
     private var current: Request<*>? = null
+    private var holdTasks = false
+    private var drained: (() -> Unit)? = null
+
+    @Volatile
+    var initCapture = false
 
     fun <D> request(device: D, queued: Boolean, operation: (Request<D>) -> Unit) = Request(device, this, queued, operation)
 
     internal fun submit(request: Request<*>, queued: Boolean) {
         scheduler.execute {
             if (queued) {
-                waiting.addLast(request)
+                (if (request.forInit) initWaiting else waiting).addLast(request)
                 pump()
             } else {
                 request.start()
@@ -151,15 +177,33 @@ class RequestQueue(internal val scheduler: ScheduledExecutorService, internal va
         scheduler.execute { abortNow() }
     }
 
+    internal fun beginInit() {
+        holdTasks = true
+    }
+
+    internal fun endInit(onDrained: () -> Unit) {
+        drained = onDrained
+        pump()
+    }
+
     internal fun abortNow() {
         val inFlight = current
         waiting.clear()
+        initWaiting.clear()
+        holdTasks = false
+        drained = null
         inFlight?.failWith(Reason.DEVICE_DISCONNECTED)
     }
 
     private fun pump() {
         if (current != null) return
-        val next = waiting.removeFirstOrNull() ?: return
+        if (holdTasks && initWaiting.isEmpty()) {
+            val callback = drained ?: return
+            holdTasks = false
+            drained = null
+            callback()
+        }
+        val next = initWaiting.removeFirstOrNull() ?: waiting.removeFirstOrNull() ?: return
         current = next
         next.start()
     }

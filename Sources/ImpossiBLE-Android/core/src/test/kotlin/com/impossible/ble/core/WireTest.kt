@@ -5,6 +5,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Test
@@ -113,5 +114,35 @@ class WireTest {
         assertThat(Wire.decode("""{"type":"didModifyServices"}""")).isEqualTo(Unknown("didModifyServices"))
         assertThat(Wire.decode("not json")).isEqualTo(Unknown(""))
         assertThat(Wire.decode("""{"type":"didUpdateValue","id":"p"}""")).isEqualTo(Unknown("didUpdateValue"))
+    }
+
+    @Test
+    fun `given discovery requests, then shapes match the bridge`() {
+        val services = obj(Wire.discoverServices("p"))
+        assertThat(services["type"]?.jsonPrimitive?.content).isEqualTo("discoverServices")
+        assertThat(services["services"]?.jsonArray).isEmpty()
+        val chars = obj(Wire.discoverCharacteristics("p", "s1"))
+        assertThat(chars["serviceId"]?.jsonPrimitive?.content).isEqualTo("s1")
+        assertThat(chars["characteristics"]?.jsonArray).isEmpty()
+        assertThat(obj(Wire.discoverDescriptors("p", "c1"))["characteristicId"]?.jsonPrimitive?.content).isEqualTo("c1")
+    }
+
+    @Test
+    fun `given discovery replies, then services, characteristics and descriptors decode with expanded uuids`() {
+        val s = Wire.decode(
+            """{"type":"didDiscoverServices","id":"p","services":[{"id":"s1","uuid":"180D","primary":true},{"id":"s2","uuid":"CE060020-43E5-11E4-916C-0800200C9A66"}],"error":""}""",
+        ) as DidDiscoverServices
+        assertThat(s.services).containsExactly(
+            ServiceInfo("s1", "0000180d-0000-1000-8000-00805f9b34fb", true),
+            ServiceInfo("s2", "ce060020-43e5-11e4-916c-0800200c9a66", false),
+        ).inOrder()
+        val c = Wire.decode(
+            """{"type":"didDiscoverCharacteristics","id":"p","serviceId":"s1","characteristics":[{"id":"c1","uuid":"2A37","properties":18}],"error":"x"}""",
+        ) as DidDiscoverCharacteristics
+        assertThat(c.serviceId).isEqualTo("s1")
+        assertThat(c.characteristics).containsExactly(CharacteristicInfo("c1", "00002a37-0000-1000-8000-00805f9b34fb", 18))
+        assertThat(c.error).isEqualTo("x")
+        val d = Wire.decode("""{"type":"didDiscoverDescriptors","id":"p","characteristicId":"c1","descriptors":[{"id":"d1","uuid":"2902"}],"error":""}""") as DidDiscoverDescriptors
+        assertThat(d.descriptors).containsExactly(DescriptorInfo("d1", "00002902-0000-1000-8000-00805f9b34fb"))
     }
 }

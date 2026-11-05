@@ -73,4 +73,4 @@ class Gatt<D>(private val session: Session, private val id: String, private val 
     }
 }
 
-private fun Request<*>.track(token: Token) = onFinished { token.cancel() }
+internal fun Request<*>.track(token: Token) = onFinished { token.cancel() }

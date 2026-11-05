@@ -48,6 +48,13 @@ class Scanner(private val session: Session, private val identity: Identity) {
         }
     }
 
+    fun onTransportUp() {
+        session.scheduler.execute {
+            val first = subscriptions.firstOrNull() ?: return@execute
+            session.send(Wire.scan(first.services))
+        }
+    }
+
     fun stop(subscription: ScanSubscription) {
         session.scheduler.execute {
             subscription.flush?.cancel(false)

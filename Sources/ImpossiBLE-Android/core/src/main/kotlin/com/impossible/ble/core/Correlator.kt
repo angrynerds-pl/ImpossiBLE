@@ -1,6 +1,8 @@
 package com.impossible.ble.core
 
-enum class Kind { Connect, Disconnect, Read, Write, Notify }
+enum class Kind { Connect, Disconnect, Read, Write, Notify, DiscoverServices, DiscoverCharacteristics }
+
+private val LOSS_KINDS = setOf(Kind.Connect, Kind.Disconnect, Kind.DiscoverServices, Kind.DiscoverCharacteristics)
 
 data class Key(val kind: Kind, val id: String, val characteristicId: String = "")
 
@@ -23,6 +25,8 @@ class Correlator(private val onNotification: (DidUpdateValue) -> Unit) {
         when (message) {
             is DidConnect -> resolve(Key(Kind.Connect, message.id), message)
             is DidFailConnect -> resolve(Key(Kind.Connect, message.id), message)
+            is DidDiscoverServices -> resolve(Key(Kind.DiscoverServices, message.id), message)
+            is DidDiscoverCharacteristics -> resolve(Key(Kind.DiscoverCharacteristics, message.id, message.serviceId), message)
             is DidDisconnect -> lost(message.id, message)
             is DidWriteValue -> resolve(Key(Kind.Write, message.id, message.characteristicId), message)
             is DidUpdateNotification -> resolve(Key(Kind.Notify, message.id, message.characteristicId), message)
@@ -32,7 +36,7 @@ class Correlator(private val onNotification: (DidUpdateValue) -> Unit) {
     }
 
     fun lost(id: String?, message: DidDisconnect? = null) {
-        val keys = pending.keys.filter { (it.kind == Kind.Connect || it.kind == Kind.Disconnect) && (id == null || it.id == id) }
+        val keys = pending.keys.filter { it.kind in LOSS_KINDS && (id == null || it.id == id) }
         keys.forEach { key -> while (resolve(key, message ?: DidDisconnect(key.id, ""))) Unit }
     }
 

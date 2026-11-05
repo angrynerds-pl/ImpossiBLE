@@ -102,4 +102,22 @@ class ScanTest {
         assertThat(batches).isEmpty()
         assertThat(singles).isEmpty()
     }
+
+    @Test
+    fun `given an active scan, when the transport reconnects, then the wire scan is sent again and not without subscribers`() {
+        scanner.onTransportUp()
+        f.drain()
+        assertThat(f.sent).isEmpty()
+        val a = sub()
+        scanner.start(a)
+        f.drain()
+        scanner.onTransportUp()
+        f.drain()
+        assertThat(f.sent.filter { it.contains("\"type\":\"scan\"") }).hasSize(2)
+        scanner.stop(a)
+        f.drain()
+        scanner.onTransportUp()
+        f.drain()
+        assertThat(f.sent.filter { it.contains("\"type\":\"scan\"") }).hasSize(2)
+    }
 }

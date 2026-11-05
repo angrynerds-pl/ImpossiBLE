@@ -33,6 +33,17 @@ data class DidFailConnect(val id: String, val error: String) : Incoming
 data class DidDisconnect(val id: String, val error: String) : Incoming
 data class DidWriteValue(val id: String, val characteristicId: String, val error: String, val writeType: Int?) : Incoming
 data class DidUpdateNotification(val id: String, val characteristicId: String, val enabled: Boolean, val error: String) : Incoming
+data class ServiceInfo(val id: String, val uuid: String, val primary: Boolean)
+data class CharacteristicInfo(val id: String, val uuid: String, val properties: Int)
+data class DescriptorInfo(val id: String, val uuid: String)
+data class DidDiscoverServices(val id: String, val services: List<ServiceInfo>, val error: String) : Incoming
+data class DidDiscoverCharacteristics(
+    val id: String,
+    val serviceId: String,
+    val characteristics: List<CharacteristicInfo>,
+    val error: String,
+) : Incoming
+data class DidDiscoverDescriptors(val id: String, val characteristicId: String, val descriptors: List<DescriptorInfo>, val error: String) : Incoming
 data class ConnectionRejected(val retry: Boolean) : Incoming
 data class Unknown(val type: String) : Incoming
 
@@ -72,6 +83,25 @@ object Wire {
     fun connect(id: String): String = line { put("type", "connect"); put("id", id) }
 
     fun cancel(id: String): String = line { put("type", "cancel"); put("id", id) }
+
+    fun discoverServices(id: String): String = line {
+        put("type", "discoverServices")
+        put("id", id)
+        putJsonArray("services") {}
+    }
+
+    fun discoverCharacteristics(id: String, serviceId: String): String = line {
+        put("type", "discoverCharacteristics")
+        put("id", id)
+        put("serviceId", serviceId)
+        putJsonArray("characteristics") {}
+    }
+
+    fun discoverDescriptors(id: String, characteristicId: String): String = line {
+        put("type", "discoverDescriptors")
+        put("id", id)
+        put("characteristicId", characteristicId)
+    }
 
     fun read(id: String, characteristicId: String): String = line {
         put("type", "read")
@@ -120,10 +150,28 @@ object Wire {
             } else {
                 null
             }
+            "didDiscoverServices" -> id?.let { DidDiscoverServices(it, items(o, "services").map(::serviceInfo), error) }
+            "didDiscoverCharacteristics" -> o.str("serviceId")?.let { svc ->
+                id?.let { DidDiscoverCharacteristics(it, svc, items(o, "characteristics").map(::characteristicInfo), error) }
+            }
+            "didDiscoverDescriptors" -> if (id != null && ch != null) {
+                DidDiscoverDescriptors(id, ch, items(o, "descriptors").map(::descriptorInfo), error)
+            } else {
+                null
+            }
             "connectionRejected" -> ConnectionRejected(o.bool("retry") ?: false)
             else -> null
         }
     }
+
+    private fun items(o: JsonObject, key: String): List<JsonObject> = (o[key] as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
+
+    private fun serviceInfo(o: JsonObject) = ServiceInfo(o.str("id").orEmpty(), Uuids.expand(o.str("uuid").orEmpty()), o.bool("primary") ?: false)
+
+    private fun characteristicInfo(o: JsonObject) =
+        CharacteristicInfo(o.str("id").orEmpty(), Uuids.expand(o.str("uuid").orEmpty()), o.int("properties") ?: 0)
+
+    private fun descriptorInfo(o: JsonObject) = DescriptorInfo(o.str("id").orEmpty(), Uuids.expand(o.str("uuid").orEmpty()))
 
     private fun advertisement(element: JsonElement?): Advertisement {
         val adv = element as? JsonObject ?: JsonObject(emptyMap())
