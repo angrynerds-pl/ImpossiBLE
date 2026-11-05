@@ -558,6 +558,9 @@ final class PM5RemoteEngine {
                 if active?.peripheralID == id {
                     finish(.failure(ToolError("The PM5 disconnected")))
                 }
+                if let command = peripherals[id]?.commandCharacteristicID {
+                    unconsumedWriteAcks[command] = nil
+                }
                 peripherals[id] = nil
                 publishConnections()
             case "didDiscoverCharacteristics":

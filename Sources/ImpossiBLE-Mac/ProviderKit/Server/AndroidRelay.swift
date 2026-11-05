@@ -34,6 +34,13 @@ public final class AndroidRelay: ObservableObject {
         case listening
         case blocked(String)
         case failed(String)
+
+        var isFailedOrBlocked: Bool {
+            switch self {
+                case .blocked, .failed: true
+                default: false
+            }
+        }
     }
 
     public static let enabledKey = "AndroidRelayEnabled"
@@ -149,12 +156,12 @@ public final class AndroidRelay: ObservableObject {
             status = .failed("could not generate a token")
             return
         }
-        let wasRunning = process != nil
+        let shouldRun = isEnabled && (process != nil || status.isFailedOrBlocked)
         stop()
         token = fresh
         defaults.set(fresh, forKey: Self.tokenKey)
         restartBudget.reset()
-        if wasRunning { start() }
+        if shouldRun { start() }
     }
 
     public func setEnabled(_ enabled: Bool) {
@@ -162,6 +169,7 @@ public final class AndroidRelay: ObservableObject {
         isEnabled = enabled
         defaults.set(enabled, forKey: Self.enabledKey)
         if enabled {
+            restartBudget.reset()
             start()
         } else {
             stop()

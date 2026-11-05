@@ -121,6 +121,9 @@ The Android library (`Sources/ImpossiBLE-Android`, own Gradle build) reaches the
 - Pre-auth hardening: at most 8 unauthenticated connections (extras are closed on accept), a 3 s auth deadline, a 4 KiB first-line limit, pre-auth reads on their own queue.
 - The token is generated with `SecRandomCopyBytes` (failure means no token, never zeros), persisted under `AndroidRelayToken`, copied to the pasteboard as concealed/transient, and replaced by the panel's regenerate action (restarts the helper).
 - `MockServer` recognises the relay's client by pid (`setRelayPid`); only that client gets `didWriteValue` replies for writes without response (iOS never does), and `PM5RemoteEngine.bridgeAcksWriteWithoutResponse` makes the engine swallow the bridge's acks for its own injected writes.
+- Android library request timeouts: default 15 s per request, set app-wide with `ImpossibleBle.configure(requestTimeoutMs = …)` or manifest meta-data `com.impossible.ble.REQUEST_TIMEOUT_MS`; an explicit `.timeout(n)` on a request wins and `.timeout(0)` is unbounded. A blocking `await()` gives up after a 120 s ceiling (`awaitCeilingMs`) regardless.
+- Android TCP client (`Connection`): `send` returns false when disconnected or the bounded send queue (1024 lines) is full; a writer thread owns the socket, a watchdog drops a connection whose write stalls for 10 s, and TCP keepalive is on. On abort (disconnect) the queued requests are failed with `DEVICE_DISCONNECTED`; Nordic's BleManager silently drops them, so the shim differs on purpose.
+- The relay closes silently when `/tmp/impossible.sock` is absent (no provider serving), so the Android "wrong token" hint is ambiguous: check that the provider is running before regenerating or re-copying the token.
 - **Never upload emulator APKs** (to a store, a test cloud or a shared drive): the relay token is baked into them.
 - Android library tests: `cd Sources/ImpossiBLE-Android && ANDROID_HOME=$HOME/Library/Android/sdk ./gradlew test`.
 
@@ -213,6 +216,7 @@ When cutting a new ImpossiBLE release:
   `kCBSLibraryVersion` in `Sources/ImpossiBLE/CBSConnection.m`,
   `AppVersion.current` in `Sources/ImpossiBLE-Mac/Models/AppVersion.swift`, and
   `CFBundleShortVersionString` in `Sources/ImpossiBLE-Mac/Resources/Info.plist`.
+- Android library: `Wire.CLIENT_VERSION` in `Sources/ImpossiBLE-Android/core/src/main/kotlin/com/impossible/ble/core/Wire.kt` is a fourth version string that must match the other three.
 - Update the Homebrew formula in `mickeyl/homebrew-formulae`. Bump
   `Formula/impossible.rb` to the new tag, update the tarball SHA256, run
   `brew audit --strict --online impossible` and `brew style
