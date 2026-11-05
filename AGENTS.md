@@ -68,6 +68,7 @@ Agents drive the provider through a tools-only MCP server. The MCP logic lives i
 - **Tool handlers run on main** (`MCPSession` hops there): store, mode controller, and activity monitor are main-thread objects. Never `main.sync` from the control queue.
 - **Wire shapes are `ControlDTO`, not the persisted `Codable` form**: hex/`valueText` values and named properties/pairing/security, because agents get base64 and bitmasks wrong.
 - **The client-supplied-configuration invariants hold here too**: tools only report it (`get_status`, the `note` on working-set results) and never route it into `MockStore`.
+- `terminate_simulator_app` returns a tool error instead of succeeding when the client cannot be signalled (no pid, the app's own pid, or the Android relay's pid); see **Android relay**.
 - `set_mode` skips re-selecting the current mode, which would otherwise bounce the server and drop the connected app.
 - Agent capture uses its **own** `CaptureSession`, independent of the capture window and the serving bridge. Filter/selection logic is shared with the window through `CaptureFilter`.
 - `initialize` is answered but not required, so the shim can reconnect transparently after an app relaunch; requests in flight when the socket drops are answered by the shim with a JSON-RPC error.
@@ -91,6 +92,25 @@ Smoke test without an agent: pipe newline-delimited JSON-RPC (`initialize`, `too
 - After consuming a reply to its own command, the engine also consumes one identical reply (ignoring the status byte) within 0.3 s: a PM5 was seen answering — and executing — every command twice on one connection (status toggle `81` then `01`), which leaked the second copy to the app. The doubling itself went away after a provider restart and app reconnect; its cause is unknown. `pm5_trace` (engine ring buffer of command/response chunks with their disposition) is the tool to look with.
 - Off by default (`PM5RemoteEnabled`); `MockServer.tearDownClientState` resets the engine with the bridge.
 - `PM5State` is one GETPMCFG (`0x7E`) frame of single-byte queries (operational/workout/rowing state, workout and interval type, display type and units, battery) plus screen-state status (3 bytes); the reply is parsed as `cmd len data…`. Value names follow ErgData's PM model enums, display type/units the Concept2 CSAFE spec; unknown values keep their number. It is queried `settleDelay` (0.4 s) after a key press, since the PM acks before it redraws.
+
+## Android relay
+
+The Android library (`Sources/ImpossiBLE-Android`) reaches the provider through `impossible-relay`, because `ProtocolServer` is AF_UNIX only and stays unchanged.
+
+- **Helper.** `Sources/ImpossiBLE-Mac/Relay/main.swift`, bundled at `Contents/Helpers/impossible-relay` — outside `Contents/MacOS` and signed before the bundle, exactly like `impossible-mcp` (`make mac`/`mac-relaunch` do both). It also exits when its parent app is gone, so a crashed app does not leave it holding the port.
+- **Owner.** `AndroidRelay` (`ProviderKit/Server/AndroidRelay.swift`, main thread) runs the helper only while the persisted `AndroidRelayEnabled` toggle (default off, footer icon) is on, restarts it if it dies on its own, and shows Off / Starting / Listening / Client connected / Blocked / Failed in a panel row with the token and a copy button. Exit code 75 (port in use, found by probing before bind) is Blocked; 64 is a configuration error. Neither is retried. Configuration reaches the helper through its environment (`IMPOSSIBLE_RELAY_TOKEN`, `_PORT`, `_SOCKET`), never argv.
+- **Token.** 16 random bytes, hex, generated at the first enable and kept in UserDefaults (`AndroidRelayToken`).
+- **Per connection** (127.0.0.1:7700 only): the first line must arrive within 3 s, at most 4 KiB, be `type == "hello"` and carry the token (constant-time compare); otherwise the connection is closed silently. The hello is forwarded to `/tmp/impossible.sock` with `token` removed and `pid` forced to 0 (`platform` kept), then bytes are piped both ways with a 4 MiB cap per line toward the provider. Either side closing closes the other.
+- **Pid rule.** The provider sees the relay's pid as the peer pid for every Android client. `MockServer.terminateConnectedClient()` therefore returns an error string (and never signals) for a client with no pid, the app's own pid, or the relay's pid (`MockServer.setRelayPid`, set by `AndroidRelay`). `terminate_simulator_app` turns that into a tool error, and the panel hides the terminate button for such a client (`canTerminate`).
+- **Single client.** A second relay connection supersedes the first through `ProtocolServer`'s last-connection-wins; the evicted connection is closed by the provider and so by the relay.
+- **Android-only wire behaviour is keyed on the relay pid**, not on `hello.platform` (the transport consumes the hello and `MockServer` never sees it): `didWriteValue` replies for write-without-response are sent only to relay clients, in Mock and Passthrough alike. iOS clients must never see one, since CoreBluetooth does not report a completion for such a write.
+
+Additive protocol fields (the iOS library ignores unknown keys; `CBSActivator.m` reads only the keys it knows):
+
+- `didUpdateValue.isNotification`: `false` for the reply to a `read`, `true` for a notification. Passthrough decides with a per-characteristic pending-read counter (`CBSPassthroughBridge`: every `read` increments, every `didUpdateValue` with a positive counter decrements and reports `false`; guarded by the CB queue, cleared on `reset`). Mock replies to reads synchronously and marks them `false`; pushed values are `true`.
+- `didConnect.maxWriteWithResponse` / `maxWriteWithoutResponse`: from `maximumWriteValueLengthForType:` in Passthrough, fixed defaults (512 / 182) in Mock.
+- Write without response for relay clients: the bridge queues the write until `canSendWriteWithoutResponse`, drains on `peripheralIsReadyToSendWriteWithoutResponse:`, and acknowledges with `didWriteValue{id, characteristicId, writeType: 1, error: ""}` when the write was handed to CoreBluetooth (`CBSPassthroughBridge.reportsWriteWithoutResponseCompletion`, set per client by `MockServer`). Other clients keep the old fire-and-forget behaviour.
+- `hello.platform` (display only) and `hello.token` (consumed by the relay) exist on the Android leg only.
 
 ## Forwarding vs Mocking
 

@@ -13,6 +13,9 @@ let package = Package(
         // The stdio MCP server agents launch; pipes to the running app's
         // control socket. Bundled at Contents/Helpers/impossible-mcp.
         .executable(name: "impossible-mcp", targets: ["impossible-mcp"]),
+        // Loopback TCP front door for the Android library; bundled at
+        // Contents/Helpers/impossible-relay and run by the app.
+        .executable(name: "impossible-relay", targets: ["impossible-relay"]),
     ],
     dependencies: [
         .package(url: "https://github.com/mickeyl/SimBridgeKit.git", from: "0.1.1"),
@@ -51,10 +54,15 @@ let package = Package(
             name: "impossible-mcp",
             path: "MCPShim"
         ),
+        .executableTarget(
+            name: "impossible-relay",
+            path: "Relay"
+        ),
         .testTarget(
             name: "ImpossiBLEProviderKitTests",
             dependencies: [
                 "ImpossiBLEProviderKit",
+                "impossible-relay",
                 .product(name: "SimBridgeShell", package: "SimBridgeKit"),
             ],
             path: "Tests/ImpossiBLEProviderKitTests"

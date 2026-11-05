@@ -15,6 +15,7 @@ final class StatusBarController: NSObject, ObservableObject, NSWindowDelegate {
     private let server: MockServer
     private let modeController: ModeTransitionController<ImpossiBLEMode>
     private let control: ProviderControlServer
+    private let relay: AndroidRelay
     private var panel: StatusItemPanelController!
     private var captureWindow: NSWindow?
     private var deviceWindows: [UUID: NSWindow] = [:]
@@ -25,12 +26,14 @@ final class StatusBarController: NSObject, ObservableObject, NSWindowDelegate {
         store: MockStore,
         server: MockServer,
         modeController: ModeTransitionController<ImpossiBLEMode>,
-        control: ProviderControlServer
+        control: ProviderControlServer,
+        relay: AndroidRelay
     ) {
         self.store = store
         self.server = server
         self.modeController = modeController
         self.control = control
+        self.relay = relay
         super.init()
         panel = StatusItemPanelController(
             title: "ImpossiBLE Mock",
@@ -45,6 +48,7 @@ final class StatusBarController: NSObject, ObservableObject, NSWindowDelegate {
                 activity: self.server.passthroughActivity,
                 controller: self.modeController,
                 control: self.control,
+                relay: self.relay,
                 onDismiss: { [weak self] in self?.panel.hidePanel() },
                 onOpenCapture: { [weak self] in self?.openCaptureWindow() },
                 onOpenDevice: { [weak self] deviceId in self?.openDeviceEditor(deviceId) }
