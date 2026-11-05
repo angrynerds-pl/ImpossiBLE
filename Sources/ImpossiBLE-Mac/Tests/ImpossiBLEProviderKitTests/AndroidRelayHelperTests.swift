@@ -117,6 +117,41 @@ final class AndroidRelayHelperTests: XCTestCase {
         XCTAssertTrue(waitForClose(fd, within: 3))
     }
 
+    func testConnectionsBeyondTheUnauthenticatedCapAreClosedImmediately() throws {
+        let held = try (0..<8).map { _ in try connectToRelay() }
+        defer { held.forEach { close($0) } }
+        Thread.sleep(forTimeInterval: 0.3)
+        let extra = try connectToRelay()
+        defer { close(extra) }
+        XCTAssertTrue(waitForClose(extra, within: 1), "The ninth idle connection is refused, not queued")
+        XCTAssertFalse(waitForClose(held[0], within: 0.3), "Connections within the cap are still waiting for a hello")
+    }
+
+    func testSlotsAreReleasedWhenIdleConnectionsTimeOut() throws {
+        let held = try (0..<8).map { _ in try connectToRelay() }
+        defer { held.forEach { close($0) } }
+        XCTAssertTrue(waitForClose(held[0], within: 5), "Idle connection hits the auth deadline")
+        let fd = try connectToRelay()
+        defer { close(fd) }
+        send(#"{"type":"hello","token":"\#(relayToken)"}"# + "\n", to: fd)
+        XCTAssertNotNil(provider!.readLine(within: 3))
+    }
+
+    func testAuthenticatedConnectionsDoNotCountAgainstTheCap() throws {
+        var live: [Int32] = []
+        defer { live.forEach { close($0) } }
+        for _ in 0..<10 {
+            let fd = try connectToRelay()
+            live.append(fd)
+            send(#"{"type":"hello","token":"\#(relayToken)"}"# + "\n", to: fd)
+            provider!.closeClient()
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        let late = try connectToRelay()
+        defer { close(late) }
+        XCTAssertFalse(waitForClose(late, within: 0.5))
+    }
+
     private func connectToRelay() throws -> Int32 {
         let fd = socket(AF_INET, SOCK_STREAM, 0)
         var address = sockaddr_in()

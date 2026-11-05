@@ -267,8 +267,22 @@ private struct AndroidRelayRow: View {
             }
             Spacer(minLength: 0)
             Button {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(relay.token, forType: .string)
+                relay.regenerateToken()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Generate a new relay token and restart the relay")
+            .accessibilityLabel("Regenerate the relay token")
+            Button {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(relay.token, forType: .string)
+                // Keeps clipboard managers from storing the token.
+                pasteboard.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+                pasteboard.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
             } label: {
                 Image(systemName: "doc.on.doc")
                     .font(.caption)

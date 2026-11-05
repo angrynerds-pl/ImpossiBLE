@@ -6,7 +6,7 @@
 // shows up in `ps`: IMPOSSIBLE_RELAY_TOKEN (required), IMPOSSIBLE_RELAY_PORT,
 // IMPOSSIBLE_RELAY_SOCKET.
 //
-// Exit codes: 64 bad configuration, 75 port already in use.
+// Exit codes: 64 bad configuration, 75 port already in use, 1 unrecoverable socket error.
 
 import Darwin
 import Foundation
@@ -16,6 +16,15 @@ let firstLineLimit = 4096
 let laterLineLimit = 4 * 1024 * 1024
 let exitUsage: Int32 = 64
 let exitPortInUse: Int32 = 75
+let exitFatal: Int32 = 1
+/// Connections that have not yet presented the token; more are refused on accept.
+let maxUnauthenticated = 8
+
+let unauthenticatedLock = NSLock()
+var unauthenticatedCount = 0
+// Pre-auth reads block for up to authDeadline; keep them off the shared global pool.
+let preAuthQueue = DispatchQueue(label: "impossible.relay.preauth", attributes: .concurrent)
+let watchdogQueue = DispatchQueue(label: "impossible.relay.watchdog")
 
 let environment = ProcessInfo.processInfo.environment
 let listenPort = UInt16(environment["IMPOSSIBLE_RELAY_PORT"] ?? "") ?? 7700
@@ -142,20 +151,41 @@ func pipe(from source: Int32, to destination: Int32, pending: Data = Data(), lin
     }
 }
 
-func serve(client: Int32, token: String) {
+func leaveUnauthenticated() {
+    unauthenticatedLock.lock()
+    unauthenticatedCount -= 1
+    unauthenticatedLock.unlock()
+}
+
+/// Reserves a pre-auth slot; false when `maxUnauthenticated` are already open.
+func enterUnauthenticated() -> Bool {
+    unauthenticatedLock.lock()
+    defer { unauthenticatedLock.unlock() }
+    guard unauthenticatedCount < maxUnauthenticated else { return false }
+    unauthenticatedCount += 1
+    return true
+}
+
+/// Authenticates the client and opens the provider side. Runs on `preAuthQueue`.
+func authenticate(client: Int32, token: String) -> (provider: Int32, rest: Data)? {
+    defer { leaveUnauthenticated() }
     harden(client)
     let deadline = Date().addingTimeInterval(authDeadline)
     guard let first = readFirstLine(from: client, limit: firstLineLimit, deadline: deadline),
           let hello = forwardedHello(first.line, token: token),
           let provider = connectToProvider() else {
         close(client)
-        return
+        return nil
     }
     guard writeAll(hello, to: provider) else {
         close(client)
         close(provider)
-        return
+        return nil
     }
+    return (provider, first.rest)
+}
+
+func pipeSession(client: Int32, provider: Int32, rest: Data) {
     let finished = DispatchGroup()
     finished.enter()
     DispatchQueue.global().async {
@@ -164,7 +194,7 @@ func serve(client: Int32, token: String) {
         shutdown(provider, SHUT_RDWR)
         finished.leave()
     }
-    pipe(from: client, to: provider, pending: first.rest, lineLimit: laterLineLimit)
+    pipe(from: client, to: provider, pending: rest, lineLimit: laterLineLimit)
     shutdown(client, SHUT_RDWR)
     shutdown(provider, SHUT_RDWR)
     finished.wait()
@@ -172,10 +202,16 @@ func serve(client: Int32, token: String) {
     close(provider)
 }
 
+func serve(client: Int32, token: String) {
+    guard let session = authenticate(client: client, token: token) else { return }
+    DispatchQueue.global().async { pipeSession(client: client, provider: session.provider, rest: session.rest) }
+}
+
 func listenOnLoopback() -> Int32 {
     var address = loopbackAddress(port: listenPort)
     func isAnswering() -> Bool {
         let probe = socket(AF_INET, SOCK_STREAM, 0)
+        if probe < 0 { exit(exitFatal) }
         defer { close(probe) }
         return withUnsafePointer(to: &address) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
@@ -186,6 +222,7 @@ func listenOnLoopback() -> Int32 {
     if isAnswering() { exit(exitPortInUse) }
 
     let fd = socket(AF_INET, SOCK_STREAM, 0)
+    if fd < 0 { exit(exitFatal) }
     var on: Int32 = 1
     setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &on, socklen_t(MemoryLayout<Int32>.size))
     let bound = withUnsafePointer(to: &address) {
@@ -204,7 +241,7 @@ let server = listenOnLoopback()
 
 // A relay outliving its app would hold the port and show as Blocked next launch.
 let parent = getppid()
-let watchdog = DispatchSource.makeTimerSource(queue: .global())
+let watchdog = DispatchSource.makeTimerSource(queue: watchdogQueue)
 watchdog.schedule(deadline: .now() + 1, repeating: 1)
 watchdog.setEventHandler { if getppid() != parent { exit(0) } }
 watchdog.resume()
@@ -214,6 +251,20 @@ fflush(stdout)
 
 while true {
     let client = accept(server, nil, nil)
-    if client < 0 { continue }
-    DispatchQueue.global().async { serve(client: client, token: token) }
+    if client < 0 {
+        switch errno {
+            case EINTR:
+                continue
+            case ECONNABORTED, EMFILE, ENFILE, ENOBUFS, ENOMEM:
+                usleep(100_000)
+            default:
+                exit(exitFatal)
+        }
+        continue
+    }
+    guard enterUnauthenticated() else {
+        close(client)
+        continue
+    }
+    preAuthQueue.async { serve(client: client, token: token) }
 }
