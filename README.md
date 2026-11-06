@@ -168,6 +168,8 @@ The result is logged (`ImpossiBLE: replay passed` / `FAILED — …`). It is als
 
 When replaying a Concept2 PM5, ImpossiBLE moves the PM5's clock to the time of the replay: workout summaries and the CSAFE date/time and logged-workout replies get the current date and time, and everything else stays byte for byte. That makes a replayed workout a new one, so the Concept2 Logbook does not reject it as a duplicate of the recorded one. Set `IMPOSSIBLE_REPLAY_PM5_TIME=recorded` to keep the recorded times.
 
+For manual checks against a simulator, the Mac app's **Replay** mode offers the same: drop a recording on the panel, then pick Strict or Relaxed, a speed, and whether to move the PM5 clock to now. Each run (every app connection, or the restart button) starts from the top.
+
 The same options are available in code with `ImpossiBLESetReplayOptions(speed, .relaxed)`, called before `ImpossiBLESetupReplay`.
 
 ### Capturing Mock Configurations

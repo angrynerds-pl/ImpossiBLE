@@ -76,6 +76,7 @@ public final class MockServer: ObservableObject {
     @Published private(set) var replayRecording = ReplayRecordingState()
     @Published private(set) var replayScript: ReplayScriptState?
     @Published private(set) var replayRun: ReplayRunStatus = .idle
+    @Published private(set) var replayOptions = ReplayOptions.load()
     /// Main thread only. Identifies the responder whose status `replayRun`
     /// shows, so a replaced responder's late updates are ignored.
     private var replayRunID = 0
@@ -120,8 +121,10 @@ public final class MockServer: ObservableObject {
     private var replayEngine: ReplayEngine?
     /// The validated script, applied to the engine whenever it exists.
     private var activeReplayScript: ReplayScript?
-    /// The scripted responder currently installed, for restarts.
-    private var scriptedReplayResponder: ScriptedReplayResponder?
+    /// The responder currently installed for the loaded script, for restarts.
+    private var scriptedReplayResponder: ReplayRunResponder?
+    /// Guarded by the I/O queue; mirrors `replayOptions`.
+    private var activeReplayOptions = ReplayOptions.load()
     private var nextReplayRunID = 0
 
     private static let serverEnabledKey = "ServerEnabled"
@@ -355,14 +358,39 @@ public final class MockServer: ObservableObject {
             scriptedReplayResponder = nil
             return SilentReplayResponder()
         }
-        let responder = ScriptedReplayResponder(script: script) { [weak self] status in
-            DispatchQueue.main.async {
-                guard let self, self.replayRunID == runID else { return }
-                self.replayRun = status
+        let options = activeReplayOptions
+        let responder = ReplayRunResponder(
+            makeResponder: { onStatus in
+                let script = options.pm5CurrentTime ? script.shiftingPM5Times(to: Date()) : script
+                switch options.matching {
+                    case .strict:
+                        return ScriptedReplayResponder(script: script, speed: options.speed, onStatus: onStatus)
+                    case .relaxed:
+                        return RelaxedReplayResponder(script: script, speed: options.speed, onStatus: onStatus)
+                }
+            },
+            onStatus: { [weak self] status in
+                DispatchQueue.main.async {
+                    guard let self, self.replayRunID == runID else { return }
+                    self.replayRun = status
+                }
             }
-        }
+        )
         scriptedReplayResponder = responder
         return responder
+    }
+
+    /// Changes how the loaded recording plays; a connected client's run
+    /// restarts with the new options. Persisted.
+    func setReplayOptions(_ options: ReplayOptions) {
+        guard options != replayOptions else { return }
+        replayOptions = options
+        options.save()
+        transport.performOnIOQueue { [self] in
+            activeReplayOptions = options
+            guard activeReplayScript != nil else { return }
+            replayEngine?.replaceResponder(makeReplayResponder())
+        }
     }
 
     /// Restarts the loaded recording from its first entry for the connected

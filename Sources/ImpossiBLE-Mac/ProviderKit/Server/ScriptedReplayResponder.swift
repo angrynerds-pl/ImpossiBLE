@@ -29,6 +29,7 @@ final class ScriptedReplayResponder: ReplayResponder {
     static let fromClientTimeout: TimeInterval = 60
 
     private let script: ReplayScript
+    private let speed: Double
     private let onStatus: (ReplayRunStatus) -> Void
     private let queue = DispatchQueue(label: "impossible.replay.player")
 
@@ -44,8 +45,10 @@ final class ScriptedReplayResponder: ReplayResponder {
     private var timer: DispatchSourceTimer?
 
     /// - Parameter onStatus: progress updates, called on a private queue.
-    init(script: ReplayScript, onStatus: @escaping (ReplayRunStatus) -> Void) {
+    /// - Parameter speed: divides every recorded delay; the wait for the app is not scaled.
+    init(script: ReplayScript, speed: Double = 1, onStatus: @escaping (ReplayRunStatus) -> Void) {
         self.script = script
+        self.speed = speed > 0 ? speed : 1
         self.onStatus = onStatus
         onStatus(.waitingForClient)
     }
@@ -105,7 +108,7 @@ final class ScriptedReplayResponder: ReplayResponder {
 
             if delayedIndex != index {
                 delayedIndex = index
-                let delay = script.delay(before: index)
+                let delay = script.delay(before: index) / speed
                 if delay > 0 {
                     publishProgress()
                     schedule(after: delay) { [weak self] in self?.run() }

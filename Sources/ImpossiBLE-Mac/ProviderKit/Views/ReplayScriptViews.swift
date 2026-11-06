@@ -179,3 +179,51 @@ struct ReplayRunStatusRow: View {
         }
     }
 }
+
+/// How the loaded recording plays: matching, speed, and the PM5 clock.
+struct ReplayOptionsRow: View {
+    let options: ReplayOptions
+    let onChange: (ReplayOptions) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Picker("", selection: binding(\.matching)) {
+                    Text("Strict").tag(ReplayOptions.Matching.strict)
+                    Text("Relaxed").tag(ReplayOptions.Matching.relaxed)
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .help("Strict waits for every recorded app message in order. Relaxed answers each request from the recording and only waits for the first request of each kind — for apps that poll or subscribe in varying order, like ErgData.")
+
+                Picker("", selection: binding(\.speed)) {
+                    ForEach(ReplayOptions.speeds, id: \.self) { speed in
+                        Text("\(Int(speed))×").tag(speed)
+                    }
+                }
+                .labelsHidden()
+                .fixedSize()
+                .help("Plays recorded delays this much faster. The wait for the app is not shortened.")
+            }
+
+            Toggle(isOn: binding(\.pm5CurrentTime)) {
+                Text("Move PM5 clock to now")
+                    .font(.caption)
+            }
+            .toggleStyle(.checkbox)
+            .help("Rewrites a Concept2 PM5's workout dates and times to the time the run starts, so a replayed workout is logged as a new result instead of a duplicate of the recorded one.")
+        }
+        .controlSize(.small)
+    }
+
+    private func binding<Value>(_ keyPath: WritableKeyPath<ReplayOptions, Value>) -> Binding<Value> {
+        Binding(
+            get: { options[keyPath: keyPath] },
+            set: { value in
+                var changed = options
+                changed[keyPath: keyPath] = value
+                onChange(changed)
+            }
+        )
+    }
+}

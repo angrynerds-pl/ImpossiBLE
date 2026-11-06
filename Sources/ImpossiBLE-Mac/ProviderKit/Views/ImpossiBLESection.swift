@@ -669,6 +669,8 @@ public struct ImpossiBLESection: View {
             .padding(.top, 12)
 
             if server.replayScript?.isValid == true {
+                ReplayOptionsRow(options: server.replayOptions) { server.setReplayOptions($0) }
+                    .padding(.horizontal, 12)
                 ReplayRunStatusRow(status: server.replayRun)
                     .padding(.horizontal, 12)
                 Spacer(minLength: 0)
