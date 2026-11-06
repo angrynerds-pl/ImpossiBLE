@@ -102,6 +102,10 @@ abstract class BleManager(protected val context: Context) {
         }
     })
 
+    /** The relay has no GATT cache to refresh, so the request fails and callers fall back to the discovered profile. */
+    protected fun refreshDeviceCache(): Request =
+        SimpleRequest("refreshDeviceCache", local { l -> l.local { r -> r.failWith(Reason.REQUEST_FAILED) } })
+
     protected fun requestConnectionPriority(priority: Int): ConnectionPriorityRequest =
         ConnectionPriorityRequest("requestConnectionPriority", local { l -> l.local { r -> r.succeed() } })
 

@@ -93,6 +93,8 @@ class MtuRequest internal constructor(name: String, factory: Factory) : Request(
     override fun then(callback: AfterCallback): MtuRequest = apply { super.then(callback) }
 }
 
+class SimpleRequest internal constructor(name: String, factory: Factory) : Request(name, factory)
+
 class ConnectionPriorityRequest internal constructor(name: String, factory: Factory) : Request(name, factory) {
     override fun done(callback: SuccessCallback): ConnectionPriorityRequest = apply { super.done(callback) }
 
