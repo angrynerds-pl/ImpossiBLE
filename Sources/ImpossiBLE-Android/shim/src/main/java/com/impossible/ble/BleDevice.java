@@ -17,6 +17,11 @@ public final class BleDevice {
         return name;
     }
 
+    /** A relayed device is never bonded; mirrors BluetoothDevice.BOND_NONE. */
+    public int getBondState() {
+        return 10;
+    }
+
     @Override
     public boolean equals(Object other) {
         return other instanceof BleDevice && ((BleDevice) other).address.equals(address);
