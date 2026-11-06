@@ -166,6 +166,8 @@ A recording only contains what the app itself sent and received; commands sent t
 
 The result is logged (`ImpossiBLE: replay passed` / `FAILED — …`). It is also posted as the Darwin notifications `com.impossible.replay.passed` / `com.impossible.replay.failed`, which the test runner can wait for. Posting `com.impossible.replay.restart` restarts the recording from the top.
 
+When replaying a Concept2 PM5, ImpossiBLE moves the PM5's clock to the time of the replay: workout summaries and the CSAFE date/time and logged-workout replies get the current date and time, and everything else stays byte for byte. That makes a replayed workout a new one, so the Concept2 Logbook does not reject it as a duplicate of the recorded one. Set `IMPOSSIBLE_REPLAY_PM5_TIME=recorded` to keep the recorded times.
+
 The same options are available in code with `ImpossiBLESetReplayOptions(speed, .relaxed)`, called before `ImpossiBLESetupReplay`.
 
 ### Capturing Mock Configurations

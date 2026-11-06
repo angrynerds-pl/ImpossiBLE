@@ -99,6 +99,17 @@ typedef NS_ENUM(NSInteger, ImpossiBLEReplayMatching) {
 /// `relaxed`). Defaults: speed 1, strict.
 void ImpossiBLESetReplayOptions(double speed, ImpossiBLEReplayMatching matching);
 
+/// Whether the next `ImpossiBLESetupReplay` moves a Concept2 PM5's clock to the
+/// current time (default YES). A replayed workout otherwise carries the date it
+/// was logged under when recorded, and the Concept2 Logbook rejects it as a
+/// duplicate of the original. All PM5 timestamps — workout summaries
+/// (CE060039, CE06003A, CE060080) and CSAFE date/time and logged-workout
+/// replies — move by the one offset that makes the last workout summary read
+/// as the time of setup; everything else is replayed byte for byte.
+/// `IMPOSSIBLE_REPLAY_PM5_TIME=recorded` turns it off for an
+/// environment-started replay.
+void ImpossiBLESetReplayPM5CurrentTime(BOOL enabled);
+
 /// Starts playing the recording, entries in `seq` order, waiting each entry's
 /// recorded time distance from the previous one: `toClient` messages are
 /// delivered as if from a peripheral, and each `fromClient` entry waits for

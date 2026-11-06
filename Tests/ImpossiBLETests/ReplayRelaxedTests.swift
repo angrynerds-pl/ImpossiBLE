@@ -121,6 +121,97 @@ final class ReplayRelaxedTests: XCTestCase {
         XCTAssertNotNil(app.discovered)
     }
 
+    // MARK: - PM5 clock
+
+    func testPM5TimestampsMoveToTheCurrentTime() throws {
+        let summaryCharacteristic = "\(Self.rowingService):CE060039-43E5-11E4-916C-0800200C9A66:1"
+        // Recorded on 6 Nov 2026: clock read at 11:41 AM, workout logged at 11:45.
+        let getDateTime = Self.csafe([0x7E, 0x01, 0x85])
+        let dateTimeReply = Self.reply([0x7E, 0x09, 0x85, 0x07, 0x0B, 0x29, 0x00, 0x0B, 0x06, 0x07, 0xEA])
+        let getLog = Self.csafe([0x7E, 0x01, 0x6A])
+        // The logged-workout record holds the stamp big endian.
+        let logReply = Self.reply([0x7E, 0x07, 0x6A, 0x05, 0x34, 0x6B, 0x0B, 0x2D, 0x00])
+        let summary = Data([0x6B, 0x34, 0x2D, 0x0B, 0xD8, 0x2C, 0x00, 0x14, 0x14, 0x00, 0x24])
+
+        var r = Recording()
+        r.app(["type": "scan", "services": [], "options": ["kCBScanOptionAllowDuplicates": false]])
+        r.provider(["type": "didDiscover", "id": Self.peripheralID, "name": "PM5 TEST", "rssi": -50, "adv": [:]])
+        r.app(["type": "connect", "id": Self.peripheralID, "options": [:]])
+        r.provider(["type": "didConnect", "id": Self.peripheralID])
+        r.app(["type": "discoverServices", "id": Self.peripheralID, "services": []])
+        r.provider(["type": "didDiscoverServices", "id": Self.peripheralID, "error": "", "services": [
+            ["id": Self.controlService, "uuid": "CE060020-43E5-11E4-916C-0800200C9A66", "primary": true],
+            ["id": Self.rowingService, "uuid": "CE060030-43E5-11E4-916C-0800200C9A66", "primary": true],
+        ]])
+        r.app(["type": "discoverCharacteristics", "id": Self.peripheralID, "serviceId": Self.controlService, "characteristics": []])
+        r.provider(["type": "didDiscoverCharacteristics", "id": Self.peripheralID, "serviceId": Self.controlService, "error": "", "characteristics": [
+            ["id": Self.command, "uuid": "CE060021-43E5-11E4-916C-0800200C9A66", "properties": 0x08],
+            ["id": Self.response, "uuid": "CE060022-43E5-11E4-916C-0800200C9A66", "properties": 0x10],
+        ]])
+        r.app(["type": "discoverCharacteristics", "id": Self.peripheralID, "serviceId": Self.rowingService, "characteristics": []])
+        r.provider(["type": "didDiscoverCharacteristics", "id": Self.peripheralID, "serviceId": Self.rowingService, "error": "", "characteristics": [
+            ["id": summaryCharacteristic, "uuid": "CE060039-43E5-11E4-916C-0800200C9A66", "properties": 0x10],
+        ]])
+        r.app(["type": "setNotify", "id": Self.peripheralID, "characteristicId": Self.response, "enabled": true])
+        r.provider(["type": "didUpdateNotification", "id": Self.peripheralID, "characteristicId": Self.response, "enabled": true, "error": ""])
+        r.app(["type": "setNotify", "id": Self.peripheralID, "characteristicId": summaryCharacteristic, "enabled": true])
+        r.provider(["type": "didUpdateNotification", "id": Self.peripheralID, "characteristicId": summaryCharacteristic, "enabled": true, "error": ""])
+        r.write(getDateTime)
+        r.provider(Self.writeConfirmation)
+        r.provider(Self.notification(Self.response, dateTimeReply))
+        r.provider(Self.notification(summaryCharacteristic, summary), after: 0.2)
+        r.write(getLog)
+        r.provider(Self.writeConfirmation)
+        r.provider(Self.notification(Self.response, logReply))
+
+        let passed = observeResult()
+        ImpossiBLESetReplayOptions(20, .relaxed)
+        let setUpAt = Date()
+        try setUp(r)
+
+        let app = PM5Client()
+        app.subscribeOrder = [Self.response, summaryCharacteristic]
+        app.writes = [getDateTime, getLog]
+        app.begin()
+        wait(for: [passed], timeout: 10)
+        let received = expectation(description: "replies and summary")
+        app.whenReceived(count: 3) { received.fulfill() }
+        wait(for: [received], timeout: 5)
+
+        // The summary is logged at the minute of setup; the clock read four
+        // minutes before it.
+        let logged = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: setUpAt)
+        let read = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute], from: setUpAt.addingTimeInterval(-4 * 60))
+        let stamp = Self.logStamp(logged)
+
+        let movedSummary = try XCTUnwrap(app.values[summaryCharacteristic]?.first)
+        XCTAssertEqual(Array(movedSummary.prefix(4)), stamp)
+        XCTAssertEqual(movedSummary.dropFirst(4), summary.dropFirst(4), "Only the date and time change")
+
+        let replies = app.values[Self.response] ?? []
+        XCTAssertEqual(replies.count, 2)
+        let hour12 = read.hour! % 12 == 0 ? 12 : read.hour! % 12
+        XCTAssertEqual(replies.first, Self.reply([0x7E, 0x09, 0x85, 0x07, UInt8(hour12), UInt8(read.minute!), read.hour! >= 12 ? 1 : 0,
+                                                  UInt8(read.month!), UInt8(read.day!), UInt8(read.year! >> 8), UInt8(read.year! & 0xFF)]))
+        XCTAssertEqual(replies.last, Self.reply([0x7E, 0x07, 0x6A, 0x05, stamp[1], stamp[0], stamp[3], stamp[2], 0x00]))
+    }
+
+    func testPM5TimestampsCanStayAsRecorded() throws {
+        let summaryCharacteristic = "\(Self.rowingService):CE060039-43E5-11E4-916C-0800200C9A66:1"
+        let summary = Data([0x6B, 0x34, 0x2D, 0x0B, 0xD8, 0x2C, 0x00])
+        var r = Recording()
+        r.app(["type": "scan", "services": [], "options": ["kCBScanOptionAllowDuplicates": false]])
+        r.provider(Self.notification(summaryCharacteristic, summary))
+
+        ImpossiBLESetReplayPM5CurrentTime(false)
+        defer { ImpossiBLESetReplayPM5CurrentTime(true) }
+        let file = try write(r)
+        let entries = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [[String: Any]])
+        XCTAssertEqual(((entries[1]["message"] as? [String: Any])?["value"] as? String), summary.base64EncodedString())
+        var error: NSError?
+        XCTAssertTrue(ImpossiBLESetupReplay(file.path, &error))
+    }
+
     // MARK: - Speed
 
     func testSpeedScalesStrictDelays() throws {
@@ -148,6 +239,30 @@ final class ReplayRelaxedTests: XCTestCase {
         ["type": "didUpdateValue", "id": peripheralID, "characteristicId": characteristic, "value": value.base64EncodedString(), "error": ""]
     }
 
+    /// An extended CSAFE reply from the PM (status 0x81), framed and stuffed.
+    static func reply(_ payload: [UInt8]) -> Data {
+        let body: [UInt8] = [0x81] + payload
+        return stuffed([0x00, 0xFD] + body + [body.reduce(0, ^)])
+    }
+
+    /// Log date and time as the PM5 encodes them.
+    static func logStamp(_ c: DateComponents) -> [UInt8] {
+        let date = (c.month! & 0x0F) | ((c.day! & 0x1F) << 4) | (((c.year! - 2000) & 0x7F) << 9)
+        return [UInt8(date & 0xFF), UInt8(date >> 8), UInt8(c.minute!), UInt8(c.hour!)]
+    }
+
+    private static func stuffed(_ body: [UInt8]) -> Data {
+        var frame: [UInt8] = [0xF0]
+        for byte in body {
+            if (0xF0...0xF3).contains(byte) {
+                frame += [0xF3, byte - 0xF0]
+            } else {
+                frame.append(byte)
+            }
+        }
+        return Data(frame + [0xF2])
+    }
+
     /// An extended CSAFE frame to the PM, as ErgData formats it.
     static func csafe(_ payload: [UInt8]) -> Data {
         let body = [0xFD, 0x00] + payload + [payload.reduce(0, ^)]
@@ -173,10 +288,15 @@ final class ReplayRelaxedTests: XCTestCase {
         return done
     }
 
-    private func setUp(_ recording: Recording) throws {
+    private func write(_ recording: Recording) throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("replay-\(UUID().uuidString).json")
         try recording.json().write(to: url)
         files.append(url)
+        return url
+    }
+
+    private func setUp(_ recording: Recording) throws {
+        let url = try write(recording)
         var error: NSError?
         XCTAssertTrue(ImpossiBLESetupReplay(url.path, &error), "\(String(describing: error))")
         XCTAssertTrue(ImpossiBLEStartReplay(&error), "\(String(describing: error))")

@@ -48,6 +48,14 @@ void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *_Nullable deta
                         deliver:(void (^)(NSDictionary *message))deliver;
 @end
 
+/// Moves every Concept2 PM5 timestamp in `entries` (workout summaries, CSAFE
+/// date/time and logged-workout replies on `responseChannels`) by the offset
+/// that makes the last workout summary read as `now`. Returns `entries`,
+/// rewritten in place.
+NSArray<CBSReplayEntry *> *CBSReplayShiftPM5Times(NSArray<CBSReplayEntry *> *entries,
+                                                  NSDate *now,
+                                                  NSSet<NSString *> *responseChannels);
+
 /// The command structure of a CSAFE frame, with all data left out: e.g.
 /// `76[13] 7E[80 81]`. nil unless `bytes` is one complete frame (`F0 … F2`).
 NSString *_Nullable CBSReplayCSAFESignature(NSData *bytes);

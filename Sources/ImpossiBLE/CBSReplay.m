@@ -25,6 +25,7 @@ const NSTimeInterval kCBSReplayFromClientTimeout = 60;
 
 static double gSpeed = 1;
 static ImpossiBLEReplayMatching gMatching = ImpossiBLEReplayMatchingStrict;
+static BOOL gPM5CurrentTime = YES;
 
 /// Request → response characteristic UUID prefixes for relaxed replay.
 static NSDictionary<NSString *, NSString *> *CBSReplayChannels(void)
@@ -423,9 +424,14 @@ BOOL ImpossiBLESetupReplay(NSString *path, NSError **error)
 
     double speed;
     ImpossiBLEReplayMatching matching;
+    BOOL pm5CurrentTime;
     @synchronized (CBSReplayLock()) {
         speed = gSpeed;
         matching = gMatching;
+        pm5CurrentTime = gPM5CurrentTime;
+    }
+    if (pm5CurrentTime) {
+        CBSReplayShiftPM5Times(entries, [NSDate date], [NSSet setWithArray:CBSReplayChannels().allValues]);
     }
     id<CBSReplayPlaying> player;
     if (matching == ImpossiBLEReplayMatchingRelaxed) {
@@ -466,6 +472,13 @@ void ImpossiBLESetReplayOptions(double speed, ImpossiBLEReplayMatching matching)
     @synchronized (CBSReplayLock()) {
         gSpeed = speed > 0 ? speed : 1;
         gMatching = matching;
+    }
+}
+
+void ImpossiBLESetReplayPM5CurrentTime(BOOL enabled)
+{
+    @synchronized (CBSReplayLock()) {
+        gPM5CurrentTime = enabled;
     }
 }
 
@@ -536,6 +549,7 @@ void CBSReplayStartFromEnvironment(void)
     }
     ImpossiBLESetReplayOptions(speed > 0 ? speed : 1,
                                [mode isEqualToString:@"relaxed"] ? ImpossiBLEReplayMatchingRelaxed : ImpossiBLEReplayMatchingStrict);
+    ImpossiBLESetReplayPM5CurrentTime(![environment[@"IMPOSSIBLE_REPLAY_PM5_TIME"].lowercaseString isEqualToString:@"recorded"]);
 
     NSError *error = nil;
     if (!ImpossiBLESetupReplay(path, &error) || !ImpossiBLEStartReplay(&error)) {
@@ -569,6 +583,7 @@ BOOL ImpossiBLEStartReplay(NSError **error) { return CBSReplayUnavailable(error)
 BOOL ImpossiBLEStopReplay(NSError **error) { return CBSReplayUnavailable(error); }
 BOOL ImpossiBLECleanupReplay(NSError **error) { return CBSReplayUnavailable(error); }
 void ImpossiBLESetReplayOptions(double speed, ImpossiBLEReplayMatching matching) {}
+void ImpossiBLESetReplayPM5CurrentTime(BOOL enabled) {}
 void ImpossiBLESetReplayStatusHandler(ImpossiBLEReplayStatusHandler handler) {}
 
 #endif
