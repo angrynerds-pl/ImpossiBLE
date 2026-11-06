@@ -115,6 +115,7 @@ public final class MockServer: ObservableObject {
     private var passthroughBridge: CBSPassthroughBridge?
     /// Applied to the bridge when it is created, and whenever it changes.
     private var passthroughRecordingEnabled = false
+    private var passthroughRecordingPrefix = MockServer.recordingPrefix(for: nil)
     /// Created on first Replay start and kept for the process lifetime.
     private var replayEngine: ReplayEngine?
     /// The validated script, applied to the engine whenever it exists.
@@ -217,7 +218,7 @@ public final class MockServer: ObservableObject {
             self.transport.performOnIOQueue {
                 guard self.serveMode == .passthrough else { return }
                 if self.pm5Engine.bridgeMessage(message) { return }
-                self.transport.send(message)
+                self.forwardToApp(message)
             }
         }
         bridge.activityHandler = { [weak self] peripheralId, name, operation, detail in
@@ -233,28 +234,52 @@ public final class MockServer: ObservableObject {
             }
         }
         if passthroughRecordingEnabled {
-            bridge.startRecording(toDirectory: PassthroughRecordingState.directory)
+            bridge.startRecording(toDirectory: PassthroughRecordingState.directory, filePrefix: passthroughRecordingPrefix)
         }
         passthroughBridge = bridge
+    }
+
+    /// Sends a bridge reply to the app and records it. Everything the app sees
+    /// in Passthrough goes through here — including replies the PM5 engine held
+    /// back and released later — and nothing the engine consumed does, so the
+    /// recording is exactly the app's view. I/O queue only.
+    private func forwardToApp(_ message: [String: Any]) {
+        passthroughBridge?.recordMessage(message, direction: CBSWireDirectionToClient)
+        transport.send(message)
     }
 
     /// Starts or stops recording Passthrough traffic. A recording started
     /// mid-session opens its file with the next message; each later client
     /// session gets its own file. Not persisted: every launch starts off.
-    func setPassthroughRecording(_ enabled: Bool) {
+    ///
+    /// - Parameter label: file name prefix (sanitised; `passthrough` when nil
+    ///   or empty). Starting while already recording with a different label
+    ///   closes the current file and starts a new one.
+    func setPassthroughRecording(_ enabled: Bool, label: String? = nil) {
+        let prefix = Self.recordingPrefix(for: label)
         passthroughRecording.isRecording = enabled
         if enabled {
             passthroughRecording.path = nil
         }
         transport.performOnIOQueue { [self] in
-            guard passthroughRecordingEnabled != enabled else { return }
+            guard passthroughRecordingEnabled != enabled || (enabled && prefix != passthroughRecordingPrefix) else { return }
             passthroughRecordingEnabled = enabled
             if enabled {
-                passthroughBridge?.startRecording(toDirectory: PassthroughRecordingState.directory)
+                passthroughRecordingPrefix = prefix
+                passthroughBridge?.startRecording(toDirectory: PassthroughRecordingState.directory, filePrefix: prefix)
             } else {
                 passthroughBridge?.stopRecording()
             }
         }
+    }
+
+    /// A file-name-safe recording prefix: letters, digits, `-` and `_` only,
+    /// at most 64 characters.
+    static func recordingPrefix(for label: String?) -> String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+        let cleaned = String((label ?? "").map { allowed.contains($0) ? $0 : "-" }.prefix(64))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return cleaned.isEmpty ? "passthrough" : cleaned
     }
 
     private func prepareReplayEngine() {
@@ -359,7 +384,7 @@ public final class MockServer: ObservableObject {
         let remote = pm5Remote
         let engine = PM5RemoteEngine(
             sendToBridge: { [weak self] message in self?.passthroughBridge?.handleMessage(message) },
-            sendToApp: { transport.send($0) },
+            sendToApp: { [weak self] in self?.forwardToApp($0) },
             schedule: { delay, work in
                 DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
                     transport.performOnIOQueue(work)
@@ -392,6 +417,10 @@ public final class MockServer: ObservableObject {
         guard let type = msg["type"] as? String else { return }
 
         if serveMode == .passthrough {
+            // Recorded as the app sent it, before the PM5 engine may hold it;
+            // the engine's own writes enter the bridge directly and never
+            // reach the recording.
+            passthroughBridge?.recordMessage(msg, direction: CBSWireDirectionFromClient)
             if pm5Engine.appMessage(msg) { return }
         }
         
