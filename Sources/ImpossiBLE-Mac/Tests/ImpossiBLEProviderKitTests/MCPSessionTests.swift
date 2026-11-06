@@ -86,7 +86,7 @@ final class MCPSessionTests: XCTestCase {
         let names = tools.compactMap { $0["name"] as? String }
 
         XCTAssertEqual(Set(names).count, names.count)
-        for expected in ["set_mode", "capture_save", "set_characteristic_value", "mock_activity", "inject_failure", "export_configuration"] {
+        for expected in ["set_mode", "capture_save", "set_characteristic_value", "mock_activity", "inject_failure", "export_configuration", "passthrough_record_start", "passthrough_record_stop", "passthrough_recordings_list"] {
             XCTAssertTrue(names.contains(expected), expected)
         }
         for tool in tools {
@@ -163,6 +163,29 @@ final class MCPSessionTests: XCTestCase {
 
         let badCharacteristic = call("inject_failure", ["device": "Polar H10", "operation": "connect", "characteristic": "2A37"])
         XCTAssertEqual(badCharacteristic["isError"] as? Bool, true, "connect is not characteristic-level")
+    }
+
+    func testRecordingNeedsPassthroughAndLabelsAreSanitised() {
+        let refused = call("passthrough_record_start", ["label": "pm5"])
+        XCTAssertEqual(refused["isError"] as? Bool, true, "The fixture's mode is off")
+        let text = (refused["content"] as? [[String: Any]])?.first?["text"] as? String ?? ""
+        XCTAssertTrue(text.contains("passthrough"), text)
+        XCTAssertFalse(fixture.server.passthroughRecording.isRecording)
+
+        XCTAssertEqual(MockServer.recordingPrefix(for: nil), "passthrough")
+        XCTAssertEqual(MockServer.recordingPrefix(for: "  "), "passthrough")
+        XCTAssertEqual(MockServer.recordingPrefix(for: "pm5 just-row/2min"), "pm5-just-row-2min")
+        XCTAssertEqual(MockServer.recordingPrefix(for: "../etc"), "etc")
+        XCTAssertEqual(MockServer.recordingPrefix(for: String(repeating: "a", count: 100)).count, 64)
+    }
+
+    func testRecordingEntryCountReadsTheArray() throws {
+        let url = fixture.directory.appendingPathComponent("rec.json")
+        try FileManager.default.createDirectory(at: fixture.directory, withIntermediateDirectories: true)
+        try Data("[{\"seq\":1},{\"seq\":2}]".utf8).write(to: url)
+        XCTAssertEqual(ProviderTools.entryCount(atPath: url.path), 2)
+        try Data("{}".utf8).write(to: url)
+        XCTAssertNil(ProviderTools.entryCount(atPath: url.path))
     }
 
     func testFailureRulesCanBeArmedListedAndCleared() throws {

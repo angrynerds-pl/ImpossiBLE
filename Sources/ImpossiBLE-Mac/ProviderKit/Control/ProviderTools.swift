@@ -790,6 +790,46 @@ final class ProviderTools {
             run: sync { tools, _ in tools.passthroughActivity() }
         ),
         ToolDefinition(
+            name: "passthrough_record_start",
+            description: """
+                In passthrough mode: record the simulator app's Bluetooth traffic as a replayable JSON recording \
+                (the format IMPOSSIBLE_REPLAY_RECORDING and Replay mode play back). Only what the app itself sent \
+                and received is recorded — PM5 remote commands and their replies are left out. One file per app \
+                session in /tmp/impossible-passthrough-recordings, opened with the next message. Starting again \
+                with another label closes the current file.
+                """,
+            inputSchema: schema([
+                "label": [
+                    "type": "string",
+                    "description": "File name prefix, e.g. \"pm5-just-row-2min\" (letters, digits, - and _; default passthrough)",
+                ],
+            ]),
+            readOnly: false,
+            destructive: false,
+            run: sync { tools, args in try tools.startRecording(args) }
+        ),
+        ToolDefinition(
+            name: "passthrough_record_stop",
+            description: """
+                Stop recording passthrough traffic. Returns the file of the last session and its entry count.
+                """,
+            inputSchema: schema(),
+            readOnly: false,
+            destructive: false,
+            run: { tools, _, _, completion in tools.stopRecording(completion: completion) }
+        ),
+        ToolDefinition(
+            name: "passthrough_recordings_list",
+            description: """
+                The passthrough recordings in /tmp/impossible-passthrough-recordings, newest first, with size, \
+                modification time, and entry count.
+                """,
+            inputSchema: schema(),
+            readOnly: true,
+            destructive: false,
+            run: { tools, _, _, completion in tools.listRecordings(completion: completion) }
+        ),
+        ToolDefinition(
             name: "terminate_simulator_app",
             description: """
                 Send SIGTERM to the simulator app currently connected to ImpossiBLE, e.g. to restart it with a \
@@ -826,6 +866,10 @@ final class ProviderTools {
                 "recording": capture.isRunning,
                 "inspecting": capture.isInspecting,
                 "deviceCount": capture.devices.count,
+            ],
+            "passthroughRecording": [
+                "recording": server.passthroughRecording.isRecording,
+                "path": server.passthroughRecording.path.map { $0 as Any } ?? NSNull(),
             ],
             "lastActivity": transport.lastActivity,
         ]
@@ -1335,6 +1379,106 @@ final class ProviderTools {
     }
 
     // MARK: - Passthrough
+
+    private func startRecording(_ args: [String: Any]) throws -> [String: Any] {
+        guard modeController.mode == .passthrough else {
+            throw ToolError("Recording needs passthrough mode (now \(modeController.mode.rawValue)); call set_mode first")
+        }
+        if let label = args["label"], !(label is String) {
+            throw ToolError("label must be a string")
+        }
+        let label = args["label"] as? String
+        server.setPassthroughRecording(true, label: label)
+        return [
+            "recording": true,
+            "filePrefix": MockServer.recordingPrefix(for: label),
+            "directory": PassthroughRecordingState.directory,
+            "note": "The file opens with the app's next message; passthrough_record_stop returns its path.",
+        ]
+    }
+
+    private func stopRecording(completion: @escaping ToolCompletion) {
+        let wasRecording = server.passthroughRecording.isRecording
+        server.setPassthroughRecording(false)
+        awaitFinishedRecording(wasRecording: wasRecording, attemptsLeft: Self.recordingFinishAttempts, completion: completion)
+    }
+
+    private static let recordingFinishAttempts = 8
+    private static let recordingFinishInterval: TimeInterval = 0.25
+
+    /// The recorder finishes its file on its own queue and publishes the path
+    /// to main asynchronously, so poll (up to ~2 s) until the path is known
+    /// and the file parses. Parsing — megabytes for a workout — runs off main.
+    private func awaitFinishedRecording(wasRecording: Bool, attemptsLeft: Int, completion: @escaping ToolCompletion) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.recordingFinishInterval) { [self] in
+            let path = server.passthroughRecording.path
+            DispatchQueue.global(qos: .userInitiated).async {
+                let count = path.flatMap(Self.entryCount(atPath:))
+                DispatchQueue.main.async { [self] in
+                    if count == nil, attemptsLeft > 1 {
+                        awaitFinishedRecording(wasRecording: wasRecording, attemptsLeft: attemptsLeft - 1, completion: completion)
+                        return
+                    }
+                    guard let path else {
+                        completion(.success([
+                            "wasRecording": wasRecording,
+                            "path": NSNull(),
+                            "note": "No file was opened: the app sent nothing while recording.",
+                        ]))
+                        return
+                    }
+                    completion(.success([
+                        "wasRecording": wasRecording,
+                        "path": path,
+                        "entryCount": count.map { $0 as Any } ?? NSNull(),
+                    ]))
+                }
+            }
+        }
+    }
+
+    /// Reads and parses every recording off main (each can be megabytes of
+    /// JSON); `completion` is called on main.
+    private func listRecordings(completion: @escaping ToolCompletion) {
+        let isRecording = server.passthroughRecording.isRecording
+        DispatchQueue.global(qos: .userInitiated).async {
+            let json = Self.recordings(isRecording: isRecording)
+            DispatchQueue.main.async { completion(.success(json)) }
+        }
+    }
+
+    private static func recordings(isRecording: Bool) -> [String: Any] {
+        let directory = URL(fileURLWithPath: PassthroughRecordingState.directory)
+        let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? []
+        let formatter = ISO8601DateFormatter()
+        let recordings = files
+            .filter { $0.pathExtension == "json" }
+            .compactMap { url -> (Date, [String: Any])? in
+                let values = try? url.resourceValues(forKeys: Set(keys))
+                let modified = values?.contentModificationDate ?? .distantPast
+                return (modified, [
+                    "path": url.path,
+                    "size": values?.fileSize ?? 0,
+                    "modified": formatter.string(from: modified),
+                    "entryCount": Self.entryCount(atPath: url.path).map { $0 as Any } ?? NSNull(),
+                ])
+            }
+            .sorted { $0.0 > $1.0 }
+            .map(\.1)
+        return [
+            "directory": directory.path,
+            "recording": isRecording,
+            "recordings": recordings,
+        ]
+    }
+
+    /// Entries in a recording, or nil when it is not a JSON array.
+    static func entryCount(atPath path: String) -> Int? {
+        guard let data = FileManager.default.contents(atPath: path),
+              let array = try? JSONSerialization.jsonObject(with: data) as? [Any] else { return nil }
+        return array.count
+    }
 
     private func passthroughActivity() -> [String: Any] {
         let activity = server.passthroughActivity
