@@ -4,6 +4,8 @@ import Foundation
 enum ReplayRunStatus: Equatable {
     /// No script loaded.
     case idle
+    /// A script is loaded but not started; the app is not answered.
+    case ready
     case waitingForClient
     case running(step: Int, total: Int, awaiting: String?)
     case passed(total: Int)

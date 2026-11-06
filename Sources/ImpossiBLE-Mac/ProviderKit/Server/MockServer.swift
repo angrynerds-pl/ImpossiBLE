@@ -77,6 +77,9 @@ public final class MockServer: ObservableObject {
     @Published private(set) var replayScript: ReplayScriptState?
     @Published private(set) var replayRun: ReplayRunStatus = .idle
     @Published private(set) var replayOptions = ReplayOptions.load()
+    /// Whether the loaded recording is being played. Loading a recording
+    /// leaves it stopped, so options can be set before `startReplay()`.
+    @Published private(set) var replayStarted = false
     /// Main thread only. Identifies the responder whose status `replayRun`
     /// shows, so a replaced responder's late updates are ignored.
     private var replayRunID = 0
@@ -125,6 +128,8 @@ public final class MockServer: ObservableObject {
     private var scriptedReplayResponder: ReplayRunResponder?
     /// Guarded by the I/O queue; mirrors `replayOptions`.
     private var activeReplayOptions = ReplayOptions.load()
+    /// Mirrors `replayStarted`. I/O queue.
+    private var replayStartedIO = false
     /// The connected app's current scan request in Replay mode. I/O queue.
     private var replayClientScan: [String: Any]?
     private var nextReplayRunID = 0
@@ -314,11 +319,12 @@ public final class MockServer: ObservableObject {
 
     // MARK: - Replay script
 
-    /// Loads and validates a recording for Replay mode. A valid script takes
-    /// effect immediately: a connected client's run restarts from the first
-    /// entry. An invalid one is shown as such and Replay falls back to
-    /// recording only.
+    /// Loads and validates a recording for Replay mode. It is not played
+    /// until `startReplay()`, so matching and speed can be set first; an
+    /// invalid one is shown as such. Either way Replay stops and only records
+    /// the app until started.
     func loadReplayScript(from url: URL) {
+        replayStarted = false
         let script: ReplayScript?
         do {
             let loaded = try ReplayScript.load(from: url)
@@ -336,6 +342,7 @@ public final class MockServer: ObservableObject {
     }
 
     func clearReplayScript() {
+        replayStarted = false
         replayScript = nil
         applyReplayScript(nil)
     }
@@ -343,6 +350,7 @@ public final class MockServer: ObservableObject {
     private func applyReplayScript(_ script: ReplayScript?) {
         transport.performOnIOQueue { [self] in
             activeReplayScript = script
+            replayStartedIO = false
             replaceReplayResponder()
         }
     }
@@ -363,11 +371,12 @@ public final class MockServer: ObservableObject {
         let runID = nextReplayRunID
         // Enqueued before the responder exists, so the ID switch reaches main
         // ahead of any status the new responder publishes.
+        let ready = activeReplayScript != nil && !replayStartedIO
         DispatchQueue.main.async { [weak self] in
             self?.replayRunID = runID
-            self?.replayRun = .idle
+            self?.replayRun = ready ? .ready : .idle
         }
-        guard let script = activeReplayScript else {
+        guard let script = activeReplayScript, replayStartedIO else {
             scriptedReplayResponder = nil
             return SilentReplayResponder()
         }
@@ -402,6 +411,27 @@ public final class MockServer: ObservableObject {
         transport.performOnIOQueue { [self] in
             activeReplayOptions = options
             guard activeReplayScript != nil else { return }
+            replaceReplayResponder()
+        }
+    }
+
+    /// Starts playing the loaded recording: to the connected app right away,
+    /// and from the top for every app that connects afterwards. No-op without
+    /// a valid recording.
+    func startReplay() {
+        guard replayScript?.isValid == true else { return }
+        replayStarted = true
+        transport.performOnIOQueue { [self] in
+            replayStartedIO = true
+            replaceReplayResponder()
+        }
+    }
+
+    /// Stops answering the app; the recording stays loaded, ready to start.
+    func stopReplay() {
+        replayStarted = false
+        transport.performOnIOQueue { [self] in
+            replayStartedIO = false
             replaceReplayResponder()
         }
     }

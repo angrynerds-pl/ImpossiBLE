@@ -163,6 +163,9 @@ struct ReplayRunStatusRow: View {
         switch status {
             case .idle:
                 return nil
+            case .ready:
+                return Content(icon: "pause.circle", tint: .secondary, title: "Ready to replay",
+                               detail: "Choose how to play it, then press Start. Until then the app sees no devices.")
             case .waitingForClient:
                 return Content(icon: "hourglass", tint: .secondary, title: "Waiting for the app to connect", detail: nil)
             case .running(let step, let total, let awaiting):
@@ -180,10 +183,14 @@ struct ReplayRunStatusRow: View {
     }
 }
 
-/// How the loaded recording plays: matching, speed, and the PM5 clock.
+/// How the loaded recording plays — matching, speed, the PM5 clock — and the
+/// Start/Stop button.
 struct ReplayOptionsRow: View {
     let options: ReplayOptions
+    let isStarted: Bool
     let onChange: (ReplayOptions) -> Void
+    let onStart: () -> Void
+    let onStop: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -206,14 +213,44 @@ struct ReplayOptionsRow: View {
                 .help("Plays recorded delays this much faster. The wait for the app is not shortened.")
             }
 
+            Text(matchingDescription)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
             Toggle(isOn: binding(\.pm5CurrentTime)) {
                 Text("Move PM5 clock to now")
                     .font(.caption)
             }
             .toggleStyle(.checkbox)
             .help("Rewrites a Concept2 PM5's workout dates and times to the time the run starts, so a replayed workout is logged as a new result instead of a duplicate of the recorded one.")
+
+            HStack {
+                Spacer()
+                if isStarted {
+                    Button(action: onStop) {
+                        Label("Stop", systemImage: "stop.fill")
+                    }
+                    .help("Stop answering the app. The recording stays loaded.")
+                } else {
+                    Button(action: onStart) {
+                        Label("Start", systemImage: "play.fill")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .help("Play the recording to the connected app now, and from the top to every app that connects later.")
+                }
+            }
         }
         .controlSize(.small)
+    }
+
+    private var matchingDescription: String {
+        switch options.matching {
+            case .strict:
+                return "Plays the recording exactly: waits for every message the app sent, in the recorded order, and fails if one does not come within 60 s. For flows the app repeats identically every time."
+            case .relaxed:
+                return "Answers each request the app makes with the reply recorded for it, in whatever order it comes, and plays notifications on the recorded timeline, waiting only for the first request of each kind. For apps that poll or subscribe differently on each run, like ErgData with a PM5."
+        }
     }
 
     private func binding<Value>(_ keyPath: WritableKeyPath<ReplayOptions, Value>) -> Binding<Value> {
