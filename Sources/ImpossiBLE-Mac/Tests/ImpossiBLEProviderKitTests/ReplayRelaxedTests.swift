@@ -100,6 +100,41 @@ final class ReplayRelaxedTests: XCTestCase {
         XCTAssertEqual(sent.count(of: "didDiscover"), afterConnect)
     }
 
+    func testRestartedRunKnowsTheAppIsAlreadyScanning() {
+        var r = Recording()
+        r.app(["type": "scan", "services": [], "options": [:]])
+        r.provider(["type": "didDiscover", "id": Self.peripheral, "name": "PM5", "rssi": -50])
+
+        let sent = Sent()
+        let responder = ReplayRunResponder(
+            makeResponder: { RelaxedReplayResponder(script: r.script, onStatus: $0) },
+            onStatus: { _ in }
+        )
+        responder.begin(send: sent.append)
+        responder.handle(["type": "scan", "services": [], "options": [:]])
+        let first = expectation(description: "first run")
+        first.isInverted = true
+        wait(for: [first], timeout: 0.3)
+        XCTAssertEqual(sent.count(of: "didDiscover"), 1)
+
+        // The app keeps scanning and sends no new scan request.
+        responder.start()
+        let second = expectation(description: "restarted run")
+        second.isInverted = true
+        wait(for: [second], timeout: 0.3)
+        XCTAssertEqual(sent.count(of: "didDiscover"), 2, "The restarted run advertises without a new scan")
+    }
+
+    func testAFileWithNothingForTheAppIsRejected() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("replay-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let entry: [String: Any] = ["seq": 1, "timestamp": "2026-11-06T12:00:00Z", "direction": "fromClient", "message": ["type": "scan"]]
+        try JSONSerialization.data(withJSONObject: [entry]).write(to: url)
+        XCTAssertThrowsError(try ReplayScript.load(from: url)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Passthrough recording"), error.localizedDescription)
+        }
+    }
+
     // MARK: - PM5 clock
 
     func testPM5TimestampsMoveToNow() throws {

@@ -55,6 +55,10 @@ final class ReplayRunResponder: ReplayResponder {
     private var current: ReplayResponder?
     private var currentToken = 0
     private var send: (([String: Any]) -> Void)?
+    /// The app's current scan request. An app that is already scanning does
+    /// not scan again, so a restarted run is told about it — otherwise it would
+    /// wait for a scan forever.
+    private var activeScan: [String: Any]?
 
     init(
         makeResponder: @escaping (_ onStatus: @escaping (ReplayRunStatus) -> Void) -> ReplayResponder,
@@ -66,6 +70,9 @@ final class ReplayRunResponder: ReplayResponder {
     }
 
     func begin(send: @escaping ([String: Any]) -> Void) {
+        lock.lock()
+        activeScan = nil
+        lock.unlock()
         let responder = replaceCurrent(send: send)
         responder.begin(send: send)
     }
@@ -74,13 +81,21 @@ final class ReplayRunResponder: ReplayResponder {
     func start() {
         lock.lock()
         let send = self.send
+        let scan = activeScan
         lock.unlock()
         guard let send else { return }
-        begin(send: send)
+        let responder = replaceCurrent(send: send)
+        responder.begin(send: send)
+        if let scan { responder.handle(scan) }
     }
 
     func handle(_ message: [String: Any]) {
         lock.lock()
+        switch message["type"] as? String {
+            case "scan": activeScan = message
+            case "stopScan": activeScan = nil
+            default: break
+        }
         let responder = current
         lock.unlock()
         responder?.handle(message)
@@ -91,6 +106,7 @@ final class ReplayRunResponder: ReplayResponder {
         let responder = current
         current = nil
         send = nil
+        activeScan = nil
         currentToken += 1
         lock.unlock()
         responder?.reset()

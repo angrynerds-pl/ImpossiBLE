@@ -227,6 +227,10 @@ static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
     NSUInteger _unmatched;
     dispatch_source_t _timer;
     BOOL _scanning;
+    /// The app's current scan request, kept across restarts: an app that is
+    /// already scanning does not scan again, and the new run would otherwise
+    /// wait for a scan forever.
+    NSDictionary *_activeScan;
     NSMutableDictionary<NSString *, NSDictionary *> *_advertising;
     dispatch_source_t _advertisingTimer;
 }
@@ -395,7 +399,7 @@ static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
 {
     dispatch_async(_queue, ^{
         BOOL first = !self->_started;
-        NSArray<NSDictionary *> *early = first ? [self->_preStart copy] : @[];
+        NSArray<NSDictionary *> *early = first ? [self->_preStart copy] : (self->_activeScan ? @[self->_activeScan] : @[]);
         [self resetRun];
         self->_started = YES;
         self->_running = YES;
@@ -445,8 +449,10 @@ static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
     NSString *type = message[@"type"];
     if ([type isEqual:@"scan"]) {
         _scanning = YES;
+        _activeScan = message;
     } else if ([type isEqual:@"stopScan"]) {
         _scanning = NO;
+        _activeScan = nil;
     } else if ([type isEqual:@"connect"] && [message[@"id"] isKindOfClass:NSString.class]) {
         [_advertising removeObjectForKey:message[@"id"]];
     }

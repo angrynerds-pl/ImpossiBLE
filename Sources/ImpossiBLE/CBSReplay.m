@@ -155,6 +155,10 @@ static NSArray<CBSReplayEntry *> *CBSReplayLoadScript(NSString *path, NSError **
     [entries sortUsingComparator:^NSComparisonResult(CBSReplayEntry *a, CBSReplayEntry *b) {
         return a.seq < b.seq ? NSOrderedAscending : (a.seq > b.seq ? NSOrderedDescending : NSOrderedSame);
     }];
+    if ([entries indexOfObjectPassingTest:^BOOL(CBSReplayEntry *entry, NSUInteger idx, BOOL *stop) { return !entry.fromClient; }] == NSNotFound) {
+        CBSReplayFail(error, 11, @"Nothing in it goes to the app — this looks like a file Replay mode recorded. Load a Passthrough recording (made against a real device) instead.");
+        return nil;
+    }
     return entries;
 }
 

@@ -125,6 +125,8 @@ public final class MockServer: ObservableObject {
     private var scriptedReplayResponder: ReplayRunResponder?
     /// Guarded by the I/O queue; mirrors `replayOptions`.
     private var activeReplayOptions = ReplayOptions.load()
+    /// The connected app's current scan request in Replay mode. I/O queue.
+    private var replayClientScan: [String: Any]?
     private var nextReplayRunID = 0
 
     private static let serverEnabledKey = "ServerEnabled"
@@ -196,6 +198,7 @@ public final class MockServer: ObservableObject {
     /// Everything the previous client owned, in both modes. Runs on connect,
     /// disconnect, takeover, and stop alike.
     private func tearDownClientState() {
+        replayClientScan = nil
         connectedPeripherals.removeAll()
         pairedPeripherals.removeAll()
         writtenCharValues.removeAll()
@@ -340,7 +343,17 @@ public final class MockServer: ObservableObject {
     private func applyReplayScript(_ script: ReplayScript?) {
         transport.performOnIOQueue { [self] in
             activeReplayScript = script
-            replayEngine?.replaceResponder(makeReplayResponder())
+            replaceReplayResponder()
+        }
+    }
+
+    /// Installs a responder for the current script and options. A connected
+    /// app that is already scanning will not scan again, so the new run is
+    /// told about its scan. I/O queue only.
+    private func replaceReplayResponder() {
+        replayEngine?.replaceResponder(makeReplayResponder())
+        if let scan = replayClientScan {
+            scriptedReplayResponder?.handle(scan)
         }
     }
 
@@ -389,7 +402,7 @@ public final class MockServer: ObservableObject {
         transport.performOnIOQueue { [self] in
             activeReplayOptions = options
             guard activeReplayScript != nil else { return }
-            replayEngine?.replaceResponder(makeReplayResponder())
+            replaceReplayResponder()
         }
     }
 
@@ -457,6 +470,11 @@ public final class MockServer: ObservableObject {
                 passthroughBridge?.handleMessage(msg)
                 return
             case .replay:
+                switch type {
+                    case "scan": replayClientScan = msg
+                    case "stopScan": replayClientScan = nil
+                    default: break
+                }
                 replayEngine?.handleMessage(msg)
                 return
             case .mock:

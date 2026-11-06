@@ -60,6 +60,9 @@ struct ReplayScript {
             entries.append(entry)
         }
         entries.sort { $0.seq < $1.seq }
+        guard entries.contains(where: { $0.direction == .toClient }) else {
+            throw ReplayScriptError("Nothing in it goes to the app — this looks like a file Replay mode recorded. Load a Passthrough recording (made against a real device) instead.")
+        }
         return ReplayScript(entries: entries)
     }
 
