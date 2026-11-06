@@ -126,6 +126,7 @@ The Android library (`Sources/ImpossiBLE-Android`, own Gradle build) reaches the
 - The relay closes silently when `/tmp/impossible.sock` is absent (no provider serving), so the Android "wrong token" hint is ambiguous: check that the provider is running before regenerating or re-copying the token.
 - **Never upload emulator APKs** (to a store, a test cloud or a shared drive): the relay token is baked into them.
 - Android library tests: `cd Sources/ImpossiBLE-Android && ANDROID_HOME=$HOME/Library/Android/sdk ./gradlew test`.
+- Android consumption: `./gradlew publishToMavenLocal` (from `Sources/ImpossiBLE-Android`) publishes `com.impossible:impossible-ble-android` (shim, `release` variant only, POM depends on core) and `com.impossible:impossible-ble-core`; consumers add `mavenLocal()` and the shim coordinate. Group and version come from the root `build.gradle.kts`, which reads `Wire.CLIENT_VERSION`, so there is no fifth version string. mavenLocal is a snapshot of the last publish: consumers must re-publish after changing the library.
 
 ## Forwarding vs Mocking
 

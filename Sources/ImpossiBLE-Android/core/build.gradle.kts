@@ -1,5 +1,6 @@
 plugins {
     id("org.jetbrains.kotlin.jvm")
+    `maven-publish`
 }
 
 repositories {
@@ -16,5 +17,18 @@ tasks.test {
     testLogging {
         events("passed", "failed")
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL
+    }
+}
+
+java {
+    withSourcesJar()
+}
+
+publishing {
+    publications {
+        create<MavenPublication>("release") {
+            artifactId = "impossible-ble-core"
+            from(components["java"])
+        }
     }
 }
