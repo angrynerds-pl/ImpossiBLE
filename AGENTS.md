@@ -187,9 +187,14 @@ When cutting a new ImpossiBLE release:
 
 - Bump the version in **three** places and keep them identical:
   `kCBSLibraryVersion` in `Sources/ImpossiBLE/CBSConnection.m`,
-  `AppVersion.current` in `Sources/ImpossiBLE-Mac/Models/AppVersion.swift`, and
+  `AppVersion.current` in `Sources/ImpossiBLE-Mac/ProviderKit/Models/AppVersion.swift`, and
   `CFBundleShortVersionString` in `Sources/ImpossiBLE-Mac/Resources/Info.plist`.
-- Update the Homebrew formula in `mickeyl/homebrew-formulae`. Bump
+- **This fork (`angrynerds-pl/ImpossiBLE`):** merge to `master`, then tag the
+  version (`git tag 3.2.0 && git push origin 3.2.0`). Consumers pin the tag
+  through SPM — ErgData in **both** `Tuist/Package.swift` (`exact:`) and
+  `ErgData/Foundation/EDBluetooth/Project.swift` (`.exact(…)`). The fork has
+  no Homebrew tap; dev/QA build the Mac app from the repo (`make install`).
+- **Upstream only (`mickeyl/ImpossiBLE`):** update the Homebrew formula in `mickeyl/homebrew-formulae`. Bump
   `Formula/impossible.rb` to the new tag, update the tarball SHA256, run
   `brew audit --strict --online impossible` and `brew style
   Formula/impossible.rb`, then commit and push the tap update. Note: since
