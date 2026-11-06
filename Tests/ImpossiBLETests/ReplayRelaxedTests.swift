@@ -17,6 +17,7 @@ final class ReplayRelaxedTests: XCTestCase {
     private var states: [(ImpossiBLEReplayState, String?)] = []
 
     override func tearDown() {
+        PM5Client.retireAll()
         ImpossiBLESetReplayStatusHandler(nil)
         ImpossiBLECleanupReplay(nil)
         ImpossiBLESetReplayOptions(1, .strict)
@@ -373,6 +374,17 @@ private final class PM5Client: NSObject, CBCentralManagerDelegate, CBPeripheralD
     func begin() {
         Self.retained.append(self)
         central = CBCentralManager(delegate: self, queue: queue)
+    }
+
+    /// Silences every client so far: a later test's replay powers Bluetooth on
+    /// again, and an old client would otherwise scan and take its advertisements.
+    static func retireAll() {
+        for client in retained {
+            client.queue.sync {
+                client.central?.stopScan()
+                client.central?.delegate = nil
+            }
+        }
     }
 
     func scan() {

@@ -189,6 +189,12 @@ static const NSTimeInterval kCBSReplayReplyWindow = 30;
 /// How many unused requests of a group are searched for one with an identical
 /// value before taking the first.
 static const NSUInteger kCBSReplayValueLookahead = 64;
+/// A peripheral keeps advertising until the app connects to it, as a real one
+/// would: its last recorded advertisement is repeated this often (real time,
+/// not scaled) while the app scans. Apps drop a device that stops advertising
+/// (ErgData after 2 s), and a recording that connected quickly holds only a
+/// few advertisements — at 10× they are gone in a fraction of a second.
+static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
 
 @implementation CBSReplayRelaxedPlayer {
     double _speed;
@@ -220,6 +226,9 @@ static const NSUInteger kCBSReplayValueLookahead = 64;
     NSUInteger _answered;
     NSUInteger _unmatched;
     dispatch_source_t _timer;
+    BOOL _scanning;
+    NSMutableDictionary<NSString *, NSDictionary *> *_advertising;
+    dispatch_source_t _advertisingTimer;
 }
 
 - (instancetype)initWithEntries:(NSArray<CBSReplayEntry *> *)entries
@@ -238,6 +247,7 @@ static const NSUInteger kCBSReplayValueLookahead = 64;
         _groupCursor = [NSMutableDictionary dictionary];
         _lastUsed = [NSMutableDictionary dictionary];
         _appFrames = [NSMutableDictionary dictionary];
+        _advertising = [NSMutableDictionary dictionary];
         _delayedT = -1;
         _accepting = YES;
         [self prepare:entries];
@@ -390,6 +400,7 @@ static const NSUInteger kCBSReplayValueLookahead = 64;
         self->_started = YES;
         self->_running = YES;
         self->_accepting = YES;
+        [self startAdvertisingTimer];
         for (NSDictionary *message in early) {
             [self answer:message];
         }
@@ -432,6 +443,13 @@ static const NSUInteger kCBSReplayValueLookahead = 64;
 - (void)answer:(NSDictionary *)message
 {
     NSString *type = message[@"type"];
+    if ([type isEqual:@"scan"]) {
+        _scanning = YES;
+    } else if ([type isEqual:@"stopScan"]) {
+        _scanning = NO;
+    } else if ([type isEqual:@"connect"] && [message[@"id"] isKindOfClass:NSString.class]) {
+        [_advertising removeObjectForKey:message[@"id"]];
+    }
     if (![type isKindOfClass:NSString.class] || !CBSReplayIsRequest(type)) return;
 
     NSString *signature = nil;
@@ -579,6 +597,9 @@ static const NSUInteger kCBSReplayValueLookahead = 64;
         }
 
         _deliver(entry.message);
+        if ([entry.type isEqual:@"didDiscover"] && [entry.message[@"id"] isKindOfClass:NSString.class]) {
+            _advertising[entry.message[@"id"]] = entry.message;
+        }
         _previousTimestamp = entry.timestamp;
         _t++;
     }
@@ -623,10 +644,35 @@ static const NSUInteger kCBSReplayValueLookahead = 64;
     CBSReplayReportStatus(ImpossiBLEReplayStateRunning, detail);
 }
 
+/// Repeats each advertising peripheral's last advertisement while the app scans.
+- (void)startAdvertisingTimer
+{
+    dispatch_source_t timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _queue);
+    uint64_t interval = (uint64_t)(kCBSReplayAdvertisingInterval * NSEC_PER_SEC);
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, (int64_t)interval), interval, NSEC_PER_SEC / 20);
+    NSUInteger generation = _generation;
+    __weak typeof(self) weakSelf = self;
+    dispatch_source_set_event_handler(timer, ^{
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf || strongSelf->_generation != generation || !strongSelf->_accepting || !strongSelf->_scanning) return;
+        for (NSDictionary *advertisement in strongSelf->_advertising.allValues) {
+            strongSelf->_deliver(advertisement);
+        }
+    });
+    dispatch_resume(timer);
+    _advertisingTimer = timer;
+}
+
 - (void)resetRun
 {
     _generation++;
     [self cancelTimer];
+    if (_advertisingTimer) {
+        dispatch_source_cancel(_advertisingTimer);
+        _advertisingTimer = nil;
+    }
+    _scanning = NO;
+    [_advertising removeAllObjects];
     _running = NO;
     _waiting = NO;
     _t = 0;
