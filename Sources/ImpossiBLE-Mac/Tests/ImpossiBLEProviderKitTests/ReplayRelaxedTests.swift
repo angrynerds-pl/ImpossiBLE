@@ -100,11 +100,13 @@ final class ReplayRelaxedTests: XCTestCase {
         XCTAssertEqual(sent.count(of: "didDiscover"), afterConnect)
     }
 
-    func testRestartedRunKnowsTheAppIsAlreadyScanning() {
+    func testANewRunToldOfTheAppsScanAdvertisesWithoutANewOne() {
         var r = Recording()
         r.app(["type": "scan", "services": [], "options": [:]])
         r.provider(["type": "didDiscover", "id": Self.peripheral, "name": "PM5", "rssi": -50])
 
+        // What MockServer.replaceReplayResponder does on a restart: a fresh
+        // run, then the scan the app is still running.
         let sent = Sent()
         let responder = ReplayRunResponder(
             makeResponder: { RelaxedReplayResponder(script: r.script, onStatus: $0) },
@@ -112,17 +114,10 @@ final class ReplayRelaxedTests: XCTestCase {
         )
         responder.begin(send: sent.append)
         responder.handle(["type": "scan", "services": [], "options": [:]])
-        let first = expectation(description: "first run")
-        first.isInverted = true
-        wait(for: [first], timeout: 0.3)
+        let advertised = expectation(description: "advertised")
+        advertised.isInverted = true
+        wait(for: [advertised], timeout: 0.3)
         XCTAssertEqual(sent.count(of: "didDiscover"), 1)
-
-        // The app keeps scanning and sends no new scan request.
-        responder.start()
-        let second = expectation(description: "restarted run")
-        second.isInverted = true
-        wait(for: [second], timeout: 0.3)
-        XCTAssertEqual(sent.count(of: "didDiscover"), 2, "The restarted run advertises without a new scan")
     }
 
     func testAFileWithNothingForTheAppIsRejected() throws {

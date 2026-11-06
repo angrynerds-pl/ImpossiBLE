@@ -105,7 +105,8 @@ void ImpossiBLESetReplayOptions(double speed, ImpossiBLEReplayMatching matching)
 /// duplicate of the original. All PM5 timestamps — workout summaries
 /// (CE060039, CE06003A, CE060080) and CSAFE date/time and logged-workout
 /// replies — move by the one offset that makes the last workout summary read
-/// as the time of setup; everything else is replayed byte for byte.
+/// as the time each run starts (every `ImpossiBLEStartReplay`, restarts
+/// included); everything else is replayed byte for byte.
 /// `IMPOSSIBLE_REPLAY_PM5_TIME=recorded` turns it off for an
 /// environment-started replay.
 void ImpossiBLESetReplayPM5CurrentTime(BOOL enabled);

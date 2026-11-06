@@ -269,13 +269,14 @@ public final class MockServer: ObservableObject {
     func setPassthroughRecording(_ enabled: Bool, label: String? = nil) {
         let prefix = Self.recordingPrefix(for: label)
         passthroughRecording.isRecording = enabled
-        if enabled {
-            passthroughRecording.path = nil
-        }
         transport.performOnIOQueue { [self] in
             guard passthroughRecordingEnabled != enabled || (enabled && prefix != passthroughRecordingPrefix) else { return }
             passthroughRecordingEnabled = enabled
             if enabled {
+                // Only a new recording drops the shown file; a repeated start
+                // keeps writing the open one, whose path will not be reported
+                // again. Enqueued before the recorder can open a new file.
+                DispatchQueue.main.async { self.passthroughRecording.path = nil }
                 passthroughRecordingPrefix = prefix
                 passthroughBridge?.startRecording(toDirectory: PassthroughRecordingState.directory, filePrefix: prefix)
             } else {
@@ -440,7 +441,8 @@ public final class MockServer: ObservableObject {
     /// client. No-op without a client or a valid recording.
     func restartReplay() {
         transport.performOnIOQueue { [self] in
-            scriptedReplayResponder?.start()
+            guard scriptedReplayResponder != nil else { return }
+            replaceReplayResponder()
         }
     }
 

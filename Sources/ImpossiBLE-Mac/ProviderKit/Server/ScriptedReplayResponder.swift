@@ -63,16 +63,6 @@ final class ScriptedReplayResponder: ReplayResponder {
         }
     }
 
-    /// Restarts the run from the first entry for the current client session.
-    /// No-op without one.
-    func start() {
-        queue.async { [self] in
-            guard send != nil else { return }
-            stopRun()
-            startRun()
-        }
-    }
-
     func handle(_ message: [String: Any]) {
         queue.async { [self] in
             guard isRunning else { return }

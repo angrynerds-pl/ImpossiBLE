@@ -224,7 +224,8 @@ extension CSAFE {
             guard data + length <= range.upperBound else { break }
             if wrappers.contains(command) {
                 changed = rewriteDateTime(&b, range: data ..< data + length, shift: shift) || changed
-            } else if command == 0x85, length == 7, (1 ... 12).contains(b[data]) {
+            } else if command == 0x85, length == 7, (1 ... 12).contains(b[data]), b[data + 1] <= 59,
+                      (1 ... 12).contains(b[data + 3]), b[data + 4] >= 1 {
                 let hour = Int(b[data]) % 12 + (b[data + 2] != 0 ? 12 : 0)
                 let stamp = PM5Stamp(year: Int(b[data + 5]) << 8 | Int(b[data + 6]), month: Int(b[data + 3]),
                                      day: Int(b[data + 4]), hour: hour, minute: Int(b[data + 1]))

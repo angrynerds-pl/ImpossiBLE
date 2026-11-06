@@ -78,6 +78,9 @@ final class RelaxedReplayResponder: ReplayResponder {
     private var isRunning = false
     private var isAnswering = false
     private var waiting = false
+    /// When the wait for the current anchor times out. Kept while the app
+    /// sends other messages, so a polling app cannot postpone it forever.
+    private var waitDeadline: (seq: Int, date: Date)?
     private var seenGroups = Set<String>()
     private var groupCursor: [String: Int] = [:]
     private var lastUsed: [String: Request] = [:]
@@ -115,14 +118,6 @@ final class RelaxedReplayResponder: ReplayResponder {
         queue.async { [self] in
             stopRun()
             self.send = send
-            startRun()
-        }
-    }
-
-    func start() {
-        queue.async { [self] in
-            guard send != nil else { return }
-            stopRun()
             startRun()
         }
     }
@@ -418,7 +413,11 @@ final class RelaxedReplayResponder: ReplayResponder {
     private func wait(for anchor: Request) {
         waiting = true
         publishProgress(awaiting: anchor.description)
-        schedule(after: Self.anchorTimeout) { [weak self] in self?.timeOut(anchor) }
+        if waitDeadline?.seq != anchor.entry.seq {
+            waitDeadline = (anchor.entry.seq, Date().addingTimeInterval(Self.anchorTimeout))
+        }
+        let remaining = max(0, waitDeadline?.date.timeIntervalSinceNow ?? Self.anchorTimeout)
+        schedule(after: remaining) { [weak self] in self?.timeOut(anchor) }
     }
 
     private func timeOut(_ anchor: Request) {
@@ -445,6 +444,7 @@ final class RelaxedReplayResponder: ReplayResponder {
         isRunning = false
         isAnswering = false
         waiting = false
+        waitDeadline = nil
         position = 0
         delayedPosition = -1
         anchorCursor = 0

@@ -827,7 +827,7 @@ final class ProviderTools {
             inputSchema: schema(),
             readOnly: true,
             destructive: false,
-            run: sync { tools, _ in tools.listRecordings() }
+            run: { tools, _, _, completion in tools.listRecordings(completion: completion) }
         ),
         ToolDefinition(
             name: "terminate_simulator_app",
@@ -1400,22 +1400,54 @@ final class ProviderTools {
     private func stopRecording(completion: @escaping ToolCompletion) {
         let wasRecording = server.passthroughRecording.isRecording
         server.setPassthroughRecording(false)
-        // The recorder writes on its own queue and publishes the file path to
-        // main asynchronously; give both a moment before reading the file.
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
-            var json: [String: Any] = ["wasRecording": wasRecording]
-            if let path = server.passthroughRecording.path {
-                json["path"] = path
-                json["entryCount"] = Self.entryCount(atPath: path).map { $0 as Any } ?? NSNull()
-            } else {
-                json["path"] = NSNull()
-                json["note"] = "No file was opened: the app sent nothing while recording."
+        awaitFinishedRecording(wasRecording: wasRecording, attemptsLeft: Self.recordingFinishAttempts, completion: completion)
+    }
+
+    private static let recordingFinishAttempts = 8
+    private static let recordingFinishInterval: TimeInterval = 0.25
+
+    /// The recorder finishes its file on its own queue and publishes the path
+    /// to main asynchronously, so poll (up to ~2 s) until the path is known
+    /// and the file parses. Parsing — megabytes for a workout — runs off main.
+    private func awaitFinishedRecording(wasRecording: Bool, attemptsLeft: Int, completion: @escaping ToolCompletion) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.recordingFinishInterval) { [self] in
+            let path = server.passthroughRecording.path
+            DispatchQueue.global(qos: .userInitiated).async {
+                let count = path.flatMap(Self.entryCount(atPath:))
+                DispatchQueue.main.async { [self] in
+                    if count == nil, attemptsLeft > 1 {
+                        awaitFinishedRecording(wasRecording: wasRecording, attemptsLeft: attemptsLeft - 1, completion: completion)
+                        return
+                    }
+                    guard let path else {
+                        completion(.success([
+                            "wasRecording": wasRecording,
+                            "path": NSNull(),
+                            "note": "No file was opened: the app sent nothing while recording.",
+                        ]))
+                        return
+                    }
+                    completion(.success([
+                        "wasRecording": wasRecording,
+                        "path": path,
+                        "entryCount": count.map { $0 as Any } ?? NSNull(),
+                    ]))
+                }
             }
-            completion(.success(json))
         }
     }
 
-    private func listRecordings() -> [String: Any] {
+    /// Reads and parses every recording off main (each can be megabytes of
+    /// JSON); `completion` is called on main.
+    private func listRecordings(completion: @escaping ToolCompletion) {
+        let isRecording = server.passthroughRecording.isRecording
+        DispatchQueue.global(qos: .userInitiated).async {
+            let json = Self.recordings(isRecording: isRecording)
+            DispatchQueue.main.async { completion(.success(json)) }
+        }
+    }
+
+    private static func recordings(isRecording: Bool) -> [String: Any] {
         let directory = URL(fileURLWithPath: PassthroughRecordingState.directory)
         let keys: [URLResourceKey] = [.fileSizeKey, .contentModificationDateKey]
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: keys)) ?? []
@@ -1436,7 +1468,7 @@ final class ProviderTools {
             .map(\.1)
         return [
             "directory": directory.path,
-            "recording": server.passthroughRecording.isRecording,
+            "recording": isRecording,
             "recordings": recordings,
         ]
     }

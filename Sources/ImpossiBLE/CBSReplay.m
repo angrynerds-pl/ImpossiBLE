@@ -213,6 +213,7 @@ void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
 @end
 
 @implementation CBSReplayPlayer {
+    void (^_willStartRun)(void);
     NSArray<CBSReplayEntry *> *_entries;
     double _speed;
     dispatch_queue_t _queue;
@@ -241,9 +242,12 @@ void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
     return self;
 }
 
+@synthesize willStartRun = _willStartRun;
+
 - (void)start
 {
     dispatch_async(_queue, ^{
+        if (self->_willStartRun) self->_willStartRun();
         // The first start keeps what the app sent since setup; a restart
         // begins from a clean slate.
         if (self->_running || !self->_accepting) {
@@ -434,17 +438,30 @@ BOOL ImpossiBLESetupReplay(NSString *path, NSError **error)
         matching = gMatching;
         pm5CurrentTime = gPM5CurrentTime;
     }
-    if (pm5CurrentTime) {
-        CBSReplayShiftPM5Times(entries, [NSDate date], [NSSet setWithArray:CBSReplayChannels().allValues]);
-    }
+    NSDictionary<NSString *, NSString *> *channels = CBSReplayChannels();
     id<CBSReplayPlaying> player;
     if (matching == ImpossiBLEReplayMatchingRelaxed) {
         player = [[CBSReplayRelaxedPlayer alloc] initWithEntries:entries
                                                            speed:speed
-                                                        channels:CBSReplayChannels()
+                                                        channels:channels
                                                          deliver:^(NSDictionary *message) { CBSConnectionDeliverLocal(message); }];
     } else {
         player = [[CBSReplayPlayer alloc] initWithEntries:entries speed:speed];
+    }
+    if (pm5CurrentTime) {
+        // Every run — the first start and each restart — moves the clock to
+        // its own start time from the recorded values, so a restarted run is
+        // not logged as a duplicate of the previous one. Only toClient values
+        // change, which neither player matches on; the players share these
+        // entry objects and call this on their queue.
+        NSArray<NSDictionary *> *recorded = [entries valueForKey:@"message"];
+        NSSet<NSString *> *responseChannels = [NSSet setWithArray:channels.allValues];
+        player.willStartRun = ^{
+            [entries enumerateObjectsUsingBlock:^(CBSReplayEntry *entry, NSUInteger index, BOOL *stop) {
+                entry.message = recorded[index];
+            }];
+            CBSReplayShiftPM5Times(entries, [NSDate date], responseChannels);
+        };
     }
     id<CBSReplayPlaying> previous;
     BOOL attached;

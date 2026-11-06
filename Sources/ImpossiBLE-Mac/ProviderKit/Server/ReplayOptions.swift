@@ -44,9 +44,10 @@ struct ReplayOptions: Equatable {
     }
 }
 
-/// Builds a fresh responder for every run — on each client session and each
-/// restart — so the PM5 clock shift uses the time the run starts. Statuses
-/// from a replaced run are dropped.
+/// Builds a fresh responder for every client session, so the PM5 clock shift
+/// uses the time the run starts. Statuses from a replaced run are dropped.
+/// Restarts replace the whole `ReplayRunResponder` (`MockServer.replaceReplayResponder`,
+/// which also re-sends the app's active scan).
 final class ReplayRunResponder: ReplayResponder {
     private let makeResponder: (_ onStatus: @escaping (ReplayRunStatus) -> Void) -> ReplayResponder
     private let onStatus: (ReplayRunStatus) -> Void
@@ -54,11 +55,6 @@ final class ReplayRunResponder: ReplayResponder {
     // Guarded by `lock`
     private var current: ReplayResponder?
     private var currentToken = 0
-    private var send: (([String: Any]) -> Void)?
-    /// The app's current scan request. An app that is already scanning does
-    /// not scan again, so a restarted run is told about it — otherwise it would
-    /// wait for a scan forever.
-    private var activeScan: [String: Any]?
 
     init(
         makeResponder: @escaping (_ onStatus: @escaping (ReplayRunStatus) -> Void) -> ReplayResponder,
@@ -70,50 +66,6 @@ final class ReplayRunResponder: ReplayResponder {
     }
 
     func begin(send: @escaping ([String: Any]) -> Void) {
-        lock.lock()
-        activeScan = nil
-        lock.unlock()
-        let responder = replaceCurrent(send: send)
-        responder.begin(send: send)
-    }
-
-    /// Restarts the run for the current client session; no-op without one.
-    func start() {
-        lock.lock()
-        let send = self.send
-        let scan = activeScan
-        lock.unlock()
-        guard let send else { return }
-        let responder = replaceCurrent(send: send)
-        responder.begin(send: send)
-        if let scan { responder.handle(scan) }
-    }
-
-    func handle(_ message: [String: Any]) {
-        lock.lock()
-        switch message["type"] as? String {
-            case "scan": activeScan = message
-            case "stopScan": activeScan = nil
-            default: break
-        }
-        let responder = current
-        lock.unlock()
-        responder?.handle(message)
-    }
-
-    func reset() {
-        lock.lock()
-        let responder = current
-        current = nil
-        send = nil
-        activeScan = nil
-        currentToken += 1
-        lock.unlock()
-        responder?.reset()
-        onStatus(.waitingForClient)
-    }
-
-    private func replaceCurrent(send: @escaping ([String: Any]) -> Void) -> ReplayResponder {
         lock.lock()
         let previous = current
         currentToken += 1
@@ -130,8 +82,24 @@ final class ReplayRunResponder: ReplayResponder {
         }
         lock.lock()
         current = responder
-        self.send = send
         lock.unlock()
-        return responder
+        responder.begin(send: send)
+    }
+
+    func handle(_ message: [String: Any]) {
+        lock.lock()
+        let responder = current
+        lock.unlock()
+        responder?.handle(message)
+    }
+
+    func reset() {
+        lock.lock()
+        let responder = current
+        current = nil
+        currentToken += 1
+        lock.unlock()
+        responder?.reset()
+        onStatus(.waitingForClient)
     }
 }

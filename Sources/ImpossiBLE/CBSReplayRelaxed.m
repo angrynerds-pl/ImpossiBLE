@@ -7,8 +7,7 @@
 // distinct request gates the timeline, in any order, and every request is
 // answered on demand with the replies the recording paired with it.
 //
-// Mirrored by the Mac app's relaxed ScriptedReplayResponder; keep the two in
-// step.
+// Mirrored by the Mac app's RelaxedReplayResponder; keep the two in step.
 
 #if TARGET_OS_SIMULATOR
 
@@ -197,6 +196,7 @@ static const NSUInteger kCBSReplayValueLookahead = 64;
 static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
 
 @implementation CBSReplayRelaxedPlayer {
+    void (^_willStartRun)(void);
     double _speed;
     NSDictionary<NSString *, NSString *> *_channels;
     void (^_deliver)(NSDictionary *);
@@ -213,6 +213,10 @@ static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
     BOOL _running;
     BOOL _accepting;
     BOOL _waiting;
+    /// When the wait for `_waitAnchorSeq` times out. Kept while the app sends
+    /// other messages, so a polling app cannot postpone it forever.
+    NSDate *_waitDeadline;
+    NSInteger _waitAnchorSeq;
     NSMutableArray<NSDictionary *> *_preStart;
     NSMutableSet<NSString *> *_seenGroups;
     NSMutableDictionary<NSString *, NSNumber *> *_groupCursor;
@@ -395,9 +399,12 @@ static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
 
 #pragma mark Public
 
+@synthesize willStartRun = _willStartRun;
+
 - (void)start
 {
     dispatch_async(_queue, ^{
+        if (self->_willStartRun) self->_willStartRun();
         BOOL first = !self->_started;
         NSArray<NSDictionary *> *early = first ? [self->_preStart copy] : (self->_activeScan ? @[self->_activeScan] : @[]);
         [self resetRun];
@@ -627,8 +634,12 @@ static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
 {
     _waiting = YES;
     [self reportProgress:anchor];
+    if (!_waitDeadline || _waitAnchorSeq != anchor.entry.seq) {
+        _waitAnchorSeq = anchor.entry.seq;
+        _waitDeadline = [NSDate dateWithTimeIntervalSinceNow:kCBSReplayFromClientTimeout];
+    }
     __weak typeof(self) weakSelf = self;
-    [self scheduleAfter:kCBSReplayFromClientTimeout block:^{ [weakSelf timeOut:anchor]; }];
+    [self scheduleAfter:MAX(0, _waitDeadline.timeIntervalSinceNow) block:^{ [weakSelf timeOut:anchor]; }];
 }
 
 - (void)timeOut:(CBSReplayRequest *)anchor
@@ -681,6 +692,7 @@ static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
     [_advertising removeAllObjects];
     _running = NO;
     _waiting = NO;
+    _waitDeadline = nil;
     _t = 0;
     _delayedT = -1;
     _anchorCursor = 0;

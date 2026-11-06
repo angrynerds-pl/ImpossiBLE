@@ -30,6 +30,9 @@ void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *_Nullable deta
 /// What both players offer the public API. All methods are asynchronous and
 /// thread-safe.
 @protocol CBSReplayPlaying <NSObject>
+/// Called on the player's queue at the top of every `start`, before anything
+/// is played — where the PM5 clock is moved to the time of that run.
+@property (nonatomic, copy, nullable) void (^willStartRun)(void);
 - (void)start;
 - (void)stop;
 - (void)handle:(NSDictionary *)message;
