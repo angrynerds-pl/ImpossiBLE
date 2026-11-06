@@ -1,5 +1,6 @@
 import Foundation
 import ImpossiBLEPassthroughCore
+import os
 import SimBridgeServer
 
 private let kSocketPath = "/tmp/impossible.sock"
@@ -91,6 +92,9 @@ public final class MockServer: ObservableObject {
     private var currentClient: SocketClientInfo?
     /// Separate from `currentClient`, which is nil when the peer pid lookup fails.
     private var isClientConnected = false
+    /// Set for Android clients (they connect through the relay): they expect a
+    /// completion reply for a write without response, which iOS never gets.
+    private var completesWritesWithoutResponse = false
     private var connectedPeripherals = Set<String>()
     private var pairedPeripherals = Set<String>()
     private var scanActive = false
@@ -124,6 +128,10 @@ public final class MockServer: ObservableObject {
     private var nextReplayRunID = 0
 
     private static let serverEnabledKey = "ServerEnabled"
+    /// What a mocked peripheral reports as its write limits (CoreBluetooth's
+    /// typical values for a 247-byte ATT MTU link).
+    private static let mockMaxWriteWithResponse = 512
+    private static let mockMaxWriteWithoutResponse = 182
 
     public init(autoStart: Bool = true) {
         transport = ProtocolServer(
@@ -171,8 +179,40 @@ public final class MockServer: ObservableObject {
         transport.stop(completion: completion)
     }
 
-    func terminateConnectedClient() {
+    /// The pid of the Android relay helper the app launched, if running. Its
+    /// clients reach the provider as the relay's pid, never as the app's own.
+    private let relayPid = OSAllocatedUnfairLock<pid_t?>(initialState: nil)
+
+    func setRelayPid(_ pid: pid_t?) {
+        relayPid.withLock { $0 = pid }
+    }
+
+    /// Why the client cannot be sent SIGTERM, or nil when it can. A client
+    /// without a pid, the app itself, and the relay (whose pid is what the
+    /// provider sees for every Android client) are never signalled.
+    static func terminationRefusal(for client: SocketClientInfo?, relayPid: pid_t?, ownPid: pid_t = getpid()) -> String? {
+        guard let client, client.pid > 0 else {
+            return "The connected client has no process id (an Android client connects through the relay), so it cannot be terminated"
+        }
+        guard client.pid != ownPid, client.pid != relayPid else {
+            return "The connected client is the Android relay, not an app process; stop the relay instead"
+        }
+        return nil
+    }
+
+    func canTerminate(_ client: SocketClientInfo?) -> Bool {
+        Self.terminationRefusal(for: client, relayPid: relayPid.withLock { $0 }) == nil
+    }
+
+    /// Sends SIGTERM to the connected client; returns the reason when it must not.
+    func terminateConnectedClient() -> String? {
+        let client = transport.connectedClient
+        if client == nil { return "No simulator app is connected" }
+        if let refusal = Self.terminationRefusal(for: client, relayPid: relayPid.withLock { $0 }) {
+            return refusal
+        }
         transport.terminateConnectedClient()
+        return nil
     }
 
     // MARK: - Connection lifecycle (called on the transport's I/O queue)
@@ -181,6 +221,10 @@ public final class MockServer: ObservableObject {
         currentClient = client
         isClientConnected = true
         tearDownClientState()
+        let isRelayClient = Self.isRelayClient(client, relayPid: relayPid.withLock { $0 })
+        completesWritesWithoutResponse = isRelayClient
+        passthroughBridge?.reportsWriteWithoutResponseCompletion = isRelayClient
+        pm5Engine?.bridgeAcksWriteWithoutResponse = isRelayClient
         if serveMode == .replay {
             replayEngine?.begin()
         }
@@ -235,6 +279,7 @@ public final class MockServer: ObservableObject {
         if passthroughRecordingEnabled {
             bridge.startRecording(toDirectory: PassthroughRecordingState.directory)
         }
+        bridge.reportsWriteWithoutResponseCompletion = completesWritesWithoutResponse
         passthroughBridge = bridge
     }
 
@@ -580,7 +625,12 @@ public final class MockServer: ObservableObject {
         }
         connectedPeripherals.insert(uuidStr)
         publishDeviceState()
-        transport.send(["type": "didConnect", "id": uuidStr])
+        transport.send([
+            "type": "didConnect",
+            "id": uuidStr,
+            "maxWriteWithResponse": Self.mockMaxWriteWithResponse,
+            "maxWriteWithoutResponse": Self.mockMaxWriteWithoutResponse,
+        ])
     }
 
     private func handleCancel(_ msg: [String: Any]) {
@@ -794,6 +844,7 @@ public final class MockServer: ObservableObject {
             "characteristicId": charId,
             "value": value?.base64EncodedString() ?? "",
             "error": "",
+            "isNotification": false,
         ])
     }
 
@@ -829,14 +880,29 @@ public final class MockServer: ObservableObject {
         activityLog.append(kind, deviceID: peripheralUUID, serviceUUID: String(parts[1]),
                            characteristicUUID: String(parts[3]), value: written)
 
-        if writeType == 0 {
-            transport.send([
-                "type": "didWriteValue",
-                "id": peripheralUUID,
-                "characteristicId": charId,
-                "error": "",
-            ])
+        if let reply = Self.writeCompletionReply(peripheralUUID: peripheralUUID, charId: charId, writeType: writeType,
+                                                 completesWritesWithoutResponse: completesWritesWithoutResponse) {
+            transport.send(reply)
         }
+    }
+
+    /// iOS never gets a reply for a write without response; the relay client does.
+    static func writeCompletionReply(peripheralUUID: String, charId: String, writeType: Int,
+                                     completesWritesWithoutResponse: Bool) -> [String: Any]? {
+        guard writeType == 0 || completesWritesWithoutResponse else { return nil }
+        var reply: [String: Any] = [
+            "type": "didWriteValue",
+            "id": peripheralUUID,
+            "characteristicId": charId,
+            "error": "",
+        ]
+        if writeType != 0 { reply["writeType"] = writeType }
+        return reply
+    }
+
+    static func isRelayClient(_ client: SocketClientInfo?, relayPid: pid_t?) -> Bool {
+        guard let client, client.pid > 0 else { return false }
+        return client.pid == relayPid
     }
 
     private func handleReadDescriptor(_ msg: [String: Any]) {
@@ -1041,7 +1107,7 @@ public final class MockServer: ObservableObject {
     }
 
     private func sendAuthError(type: String, peripheralUUID: String, idKey: String, idValue: String) {
-        transport.send([
+        var reply: [String: Any] = [
             "type": type,
             "id": peripheralUUID,
             idKey: idValue,
@@ -1049,7 +1115,9 @@ public final class MockServer: ObservableObject {
             "error": "Insufficient authentication",
             "errorDomain": "CBATTErrorDomain",
             "errorCode": 5,
-        ])
+        ]
+        if type == "didUpdateValue" { reply["isNotification"] = false }
+        transport.send(reply)
     }
 
     // MARK: - Injected failures (I/O queue)
@@ -1073,7 +1141,7 @@ public final class MockServer: ObservableObject {
 
     private func sendInjectedATTError(_ rule: MockFailureRule, type: String, peripheralUUID: String, idKey: String, idValue: String) {
         guard case .error(let message, let attError) = rule.behavior else { return }
-        transport.send([
+        var reply: [String: Any] = [
             "type": type,
             "id": peripheralUUID,
             idKey: idValue,
@@ -1081,7 +1149,9 @@ public final class MockServer: ObservableObject {
             "error": message,
             "errorDomain": "CBATTErrorDomain",
             "errorCode": attError,
-        ])
+        ]
+        if type == "didUpdateValue" { reply["isNotification"] = false }
+        transport.send(reply)
     }
 
     // MARK: - Utilities
@@ -1138,6 +1208,7 @@ extension MockServer {
                     "characteristicId": address.wireID,
                     "value": value.base64EncodedString(),
                     "error": "",
+                    "isNotification": true,
                 ])
             }
             activityLog.append(notified ? "notify" : "setValue", deviceID: address.deviceID,

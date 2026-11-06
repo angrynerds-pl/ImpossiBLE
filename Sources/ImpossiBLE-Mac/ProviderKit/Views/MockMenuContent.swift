@@ -12,6 +12,7 @@ public struct MockMenuContent: View {
     @ObservedObject var activity: PassthroughActivityMonitor
     @ObservedObject var controller: ModeTransitionController<ImpossiBLEMode>
     var control: ProviderControlServer?
+    var relay: AndroidRelay?
     var onDismiss: (() -> Void)?
     var onOpenCapture: (() -> Void)?
     var onOpenDevice: ((UUID) -> Void)?
@@ -31,6 +32,7 @@ public struct MockMenuContent: View {
         activity: PassthroughActivityMonitor,
         controller: ModeTransitionController<ImpossiBLEMode>,
         control: ProviderControlServer? = nil,
+        relay: AndroidRelay? = nil,
         onDismiss: (() -> Void)? = nil,
         onOpenCapture: (() -> Void)? = nil,
         onOpenDevice: ((UUID) -> Void)? = nil
@@ -41,6 +43,7 @@ public struct MockMenuContent: View {
         self.activity = activity
         self.controller = controller
         self.control = control
+        self.relay = relay
         self.onDismiss = onDismiss
         self.onOpenCapture = onOpenCapture
         self.onOpenDevice = onOpenDevice
@@ -59,6 +62,10 @@ public struct MockMenuContent: View {
                 onOpenCapture: onOpenCapture,
                 onOpenDevice: onOpenDevice
             )
+            if let relay, relay.isEnabled {
+                Divider()
+                AndroidRelayRow(relay: relay, transport: transport)
+            }
             Divider()
             footer
         }
@@ -140,6 +147,10 @@ public struct MockMenuContent: View {
                 AgentControlToggle(control: control, acknowledge: acknowledge)
             }
 
+            if let relay {
+                AndroidRelayToggle(relay: relay, acknowledge: acknowledge)
+            }
+
             Spacer()
 
             if !settingsAck.isEmpty {
@@ -203,6 +214,110 @@ private struct AgentControlToggle: View {
                 let count = control.connectedAgents
                 let agents = count == 0 ? "no agent connected" : "\(count) agent\(count == 1 ? "" : "s") connected"
                 return "Agent control (MCP) on — \(agents)"
+        }
+    }
+}
+
+/// Footer toggle for the Android relay.
+private struct AndroidRelayToggle: View {
+    @ObservedObject var relay: AndroidRelay
+    let acknowledge: (String) -> Void
+
+    var body: some View {
+        IconToggle(
+            systemImage: "iphone.gen3.radiowaves.left.and.right",
+            help: "Let the Android emulator reach ImpossiBLE through a loopback relay on port 7700",
+            isOn: Binding(
+                get: { relay.isEnabled },
+                set: { newValue in
+                    relay.setEnabled(newValue)
+                    acknowledge(newValue ? "Android relay on" : "Android relay off")
+                }
+            )
+        )
+    }
+}
+
+/// Relay state and the token the Android library must present.
+private struct AndroidRelayRow: View {
+    @ObservedObject var relay: AndroidRelay
+    @ObservedObject var transport: ProtocolServer
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(statusColor)
+                .frame(width: 6, height: 6)
+                .frame(width: ImpossiBLESection.statusIconColumnWidth, alignment: .center)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Android relay")
+                    .font(.caption.weight(.medium))
+                Text(statusText)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                if !relay.token.isEmpty {
+                    Text("Token \(relay.token)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .textSelection(.enabled)
+                }
+            }
+            Spacer(minLength: 0)
+            Button {
+                relay.regenerateToken()
+            } label: {
+                Image(systemName: "arrow.clockwise")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .help("Generate a new relay token and restart the relay")
+            .accessibilityLabel("Regenerate the relay token")
+            Button {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(relay.token, forType: .string)
+                // Keeps clipboard managers from storing the token.
+                pasteboard.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+                pasteboard.setData(Data(), forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
+            } label: {
+                Image(systemName: "doc.on.doc")
+                    .font(.caption)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
+            .disabled(relay.token.isEmpty)
+            .help("Copy the relay token")
+            .accessibilityLabel("Copy the relay token")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+    }
+
+    private var clientConnected: Bool {
+        guard let pid = relay.pid, let client = transport.connectedClient else { return false }
+        return client.pid == pid
+    }
+
+    private var statusText: String {
+        switch relay.status {
+            case .off: "Off"
+            case .starting: "Starting"
+            case .listening: clientConnected ? "Client connected" : "Listening on 127.0.0.1:7700"
+            case .blocked(let reason): "Blocked: \(reason)"
+            case .failed(let reason): "Failed: \(reason)"
+        }
+    }
+
+    private var statusColor: Color {
+        switch relay.status {
+            case .listening: clientConnected ? .green : .blue
+            case .starting, .off: .gray
+            case .blocked: .orange
+            case .failed: .red
         }
     }
 }

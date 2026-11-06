@@ -142,6 +142,49 @@ final class PM5RemoteEngineTests: XCTestCase {
         XCTAssertTrue(toApp.isEmpty)
     }
 
+    private func submitWriteWithoutResponse(_ done: XCTestExpectation) {
+        engine.submit(PM5Injection(deviceID: nil, payload: PM5Command.screenState(PM5Key.a.screenValue),
+                                   label: "A", swallowResponse: false, writeWithoutResponse: true) { _ in
+            done.fulfill()
+        })
+    }
+
+    private func writeAck() -> [String: Any] {
+        ["type": "didWriteValue", "id": pm5, "characteristicId": commandID, "error": "", "writeType": 1]
+    }
+
+    func testBridgeAckForOurWriteWithoutResponseDoesNotReachTheApp() {
+        engine.bridgeAcksWriteWithoutResponse = true
+        connectPM5()
+        let done = expectation(description: "done")
+        submitWriteWithoutResponse(done)
+        wait(for: [done], timeout: 1)
+
+        XCTAssertTrue(engine.bridgeMessage(writeAck()), "Consumed once")
+        XCTAssertFalse(engine.bridgeMessage(writeAck()), "A later ack is the app's own")
+    }
+
+    func testDisconnectDropsAcksTheBridgeWillNeverSend() {
+        engine.bridgeAcksWriteWithoutResponse = true
+        connectPM5()
+        let done = expectation(description: "done")
+        submitWriteWithoutResponse(done)
+        wait(for: [done], timeout: 1)
+
+        _ = engine.bridgeMessage(["type": "didDisconnect", "id": pm5])
+        connectPM5()
+        XCTAssertFalse(engine.bridgeMessage(writeAck()), "The app's own ack after a reconnect is not swallowed")
+    }
+
+    func testAckIsForwardedWhenTheBridgeDoesNotReportWriteCompletion() {
+        connectPM5()
+        let done = expectation(description: "done")
+        submitWriteWithoutResponse(done)
+        wait(for: [done], timeout: 1)
+
+        XCTAssertFalse(engine.bridgeMessage(writeAck()))
+    }
+
     func testRepliesThatAreNotOursGoToTheApp() {
         connectPM5()
         let done = expectation(description: "done")

@@ -251,7 +251,7 @@ public struct ImpossiBLESection: View {
             detail: providerStatusDetailText,
             showsClient: showsClient,
             client: showsClient ? providerClient : nil,
-            terminateClient: (showsClient && providerClient != nil) ? terminateProviderClient : nil
+            terminateClient: (showsClient && server.canTerminate(providerClient)) ? terminateProviderClient : nil
         )
     }
 
@@ -319,7 +319,7 @@ public struct ImpossiBLESection: View {
 
     private func terminateProviderClient() {
         guard currentMode != .off else { return }
-        server.terminateConnectedClient()
+        _ = server.terminateConnectedClient()
     }
 
     private var passthroughDetailText: String {
