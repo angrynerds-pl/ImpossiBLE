@@ -145,6 +145,29 @@ defaults write com.impossible.ble-mac SelectedProviderMode passthrough   # or: m
 make mac-run
 ```
 
+### Recording and Replaying
+
+Passthrough can record a session with a real device — the panel's **Record** button, or `passthrough_record_start` / `passthrough_record_stop` over MCP — and a UI test can replay that recording in the app's own process, with no Mac app running:
+
+```swift
+let app = XCUIApplication()
+app.launchEnvironment["IMPOSSIBLE_REPLAY_RECORDING"] = Bundle(for: Self.self).path(forResource: "pm5-just-row", ofType: "json")!
+app.launchEnvironment["IMPOSSIBLE_REPLAY_MODE"] = "relaxed"   // default: strict
+app.launchEnvironment["IMPOSSIBLE_REPLAY_SPEED"] = "10"       // default: 1 (recorded timing)
+app.launch()
+```
+
+A recording only contains what the app itself sent and received; commands sent through the PM5 remote are left out.
+
+**Strict** replay waits for every recorded app message, in order. Use it for apps whose traffic is the same on every run. **Relaxed** replay is for apps like a rowing app that polls on timers, subscribes in varying order, or writes the current date:
+- every app request is answered with the replies recorded for the most similar request;
+- notifications follow the recorded timeline, which only waits for the first request of each kind;
+- PM5 CSAFE commands are matched by command structure, ignoring their data. Other request/response characteristic pairs can be named with `IMPOSSIBLE_REPLAY_CHANNELS=<req-uuid-prefix>:<resp-uuid-prefix>`.
+
+The result is logged (`ImpossiBLE: replay passed` / `FAILED — …`). It is also posted as the Darwin notifications `com.impossible.replay.passed` / `com.impossible.replay.failed`, which the test runner can wait for. Posting `com.impossible.replay.restart` restarts the recording from the top.
+
+The same options are available in code with `ImpossiBLESetReplayOptions(speed, .relaxed)`, called before `ImpossiBLESetupReplay`.
+
 ### Capturing Mock Configurations
 
 <p align="center">
@@ -306,6 +329,9 @@ Working-set edits are saved immediately but only change a stored configuration t
 | Tool | Arguments | What it does |
 |---|---|---|
 | `passthrough_activity` | — | The real devices the app talks to and its latest GATT/L2CAP operation on each. |
+| `passthrough_record_start` | `label`? | Records what the app sends and receives, as a replayable JSON file in `/tmp/impossible-passthrough-recordings` named `<label>-<date>-…json`. PM5 remote traffic is left out. See [Recording and Replaying](#recording-and-replaying). |
+| `passthrough_record_stop` | — | Stops recording; returns the file and its entry count. |
+| `passthrough_recordings_list` | — | Recordings on disk, newest first, with size and entry count. |
 | `terminate_simulator_app` | — | Sends SIGTERM to the connected simulator app, e.g. to restart it with a clean Bluetooth state. |
 
 **PM5 remote** (passthrough, with the app connected to a Concept2 PM5 — see [PM5 Remote](#pm5-remote))

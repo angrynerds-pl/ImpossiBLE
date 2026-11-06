@@ -68,6 +68,37 @@ BOOL ImpossiBLESetupReplay(NSString *path, NSError * _Nullable * _Nullable error
 /// `ImpossiBLEStartReplay` instead.
 extern NSString *const ImpossiBLEReplayRestartNotification;
 
+/// Posted on the Darwin notify center when a replay passes or fails, so a UI
+/// test — another process — can wait for the result. The reason is logged
+/// (`ImpossiBLE: replay FAILED — …`); Darwin notifications carry no payload.
+extern NSString *const ImpossiBLEReplayPassedNotification;
+extern NSString *const ImpossiBLEReplayFailedNotification;
+
+typedef NS_ENUM(NSInteger, ImpossiBLEReplayMatching) {
+    /// Every recorded app message is waited for, in recorded order.
+    ImpossiBLEReplayMatchingStrict,
+    /// For apps whose traffic varies between runs (polling, unordered
+    /// subscriptions, wall-clock data in writes). Each app request is answered
+    /// on demand with the replies recorded for the most similar recorded
+    /// request — identical value first, then (for CSAFE frames on a request
+    /// channel) the same command structure, then the next of its kind; extra
+    /// requests reuse the last answer. Everything else — notifications,
+    /// advertisements, disconnects — plays on the recorded timeline, which
+    /// only waits for the first occurrence of each distinct request, in any
+    /// order. Request channels pair a write characteristic with the one its
+    /// answers are notified on: by default `CE060021` → `CE060022` (Concept2
+    /// PM5), or `IMPOSSIBLE_REPLAY_CHANNELS=req:resp[,req:resp…]` (UUID
+    /// prefixes).
+    ImpossiBLEReplayMatchingRelaxed,
+};
+
+/// Options for the next `ImpossiBLESetupReplay`. `speed` divides every
+/// recorded delay (2 plays twice as fast); the 60 s wait for the app is not
+/// scaled. A replay started from `IMPOSSIBLE_REPLAY_RECORDING` takes them from
+/// `IMPOSSIBLE_REPLAY_SPEED` and `IMPOSSIBLE_REPLAY_MODE` (`strict` or
+/// `relaxed`). Defaults: speed 1, strict.
+void ImpossiBLESetReplayOptions(double speed, ImpossiBLEReplayMatching matching);
+
 /// Starts playing the recording, entries in `seq` order, waiting each entry's
 /// recorded time distance from the previous one: `toClient` messages are
 /// delivered as if from a peripheral, and each `fromClient` entry waits for
