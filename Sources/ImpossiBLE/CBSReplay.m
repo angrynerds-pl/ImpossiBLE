@@ -165,6 +165,38 @@ static NSArray<CBSReplayEntry *> *CBSReplayLoadScript(NSString *path, NSError **
 #pragma mark - Player
 
 static ImpossiBLEReplayStatusHandler gStatusHandler;
+/// `IMPOSSIBLE_REPLAY_DEBUG`: log every message between the app and the
+/// replay, one line each, to see which request a stuck replay never answered.
+static void CBSReplayTrace(NSString *arrow, NSDictionary *message)
+{
+    static BOOL enabled;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ enabled = NSProcessInfo.processInfo.environment[@"IMPOSSIBLE_REPLAY_DEBUG"].length > 0; });
+    if (!enabled) return;
+    NSMutableString *line = [NSMutableString stringWithString:[message[@"type"] description] ?: @"?"];
+    NSString *characteristic = message[@"characteristicId"];
+    if ([characteristic isKindOfClass:NSString.class]) {
+        NSArray<NSString *> *parts = [characteristic componentsSeparatedByString:@":"];
+        if (parts.count >= 2) [line appendFormat:@" %@", [parts[parts.count - 2] substringToIndex:MIN((NSUInteger)8, parts[parts.count - 2].length)]];
+    }
+    NSString *value = message[@"value"] ?: message[@"valueB64"];
+    NSData *data = [value isKindOfClass:NSString.class] ? [[NSData alloc] initWithBase64EncodedString:value options:0] : nil;
+    if (data.length > 0) {
+        NSMutableString *hex = [NSMutableString string];
+        const uint8_t *bytes = data.bytes;
+        for (NSUInteger i = 0; i < MIN(data.length, (NSUInteger)24); i++) [hex appendFormat:@"%02X", bytes[i]];
+        [line appendFormat:@" %@%@", hex, data.length > 24 ? @"…" : @""];
+    }
+    if ([message[@"error"] isKindOfClass:NSString.class] && [message[@"error"] length] > 0) [line appendFormat:@" error=%@", message[@"error"]];
+    NSLog(@"ImpossiBLE: replay %@ %@", arrow, line);
+}
+
+static void CBSReplayDeliver(NSDictionary *message)
+{
+    CBSReplayTrace(@"→ app", message);
+    CBSConnectionDeliverLocal(message);
+}
+
 /// `IMPOSSIBLE_REPLAY_STATUS_FILE`: where a replay started from the environment
 /// writes its outcome, since a Darwin notification carries no reason.
 static NSString *gStatusFilePath;
@@ -328,7 +360,7 @@ void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
         }
 
         if (!entry.fromClient) {
-            CBSConnectionDeliverLocal(entry.message);
+            CBSReplayDeliver(entry.message);
             _index++;
         } else if ([self takePendingMatching:entry]) {
             _index++;
@@ -461,7 +493,7 @@ BOOL ImpossiBLESetupReplay(NSString *path, NSError **error)
         player = [[CBSReplayRelaxedPlayer alloc] initWithEntries:entries
                                                            speed:speed
                                                         channels:channels
-                                                         deliver:^(NSDictionary *message) { CBSConnectionDeliverLocal(message); }];
+                                                         deliver:^(NSDictionary *message) { CBSReplayDeliver(message); }];
     } else {
         player = [[CBSReplayPlayer alloc] initWithEntries:entries speed:speed];
     }
@@ -493,6 +525,7 @@ BOOL ImpossiBLESetupReplay(NSString *path, NSError **error)
         // Every outgoing message goes to whichever player is current, so a
         // second setup just swaps players without bouncing the connection.
         CBSConnectionSetLocalProvider(^(NSDictionary *message) {
+            CBSReplayTrace(@"app →", message);
             [CBSReplayCurrentPlayer() handle:message];
         });
         // Install the activator's handlers now: setup may run before the app

@@ -95,6 +95,8 @@ final class RelaxedReplayResponder: ReplayResponder {
     private var timer: DispatchSourceTimer?
     private var scanning = false
     private var advertising: [String: [String: Any]] = [:]
+    /// Peripherals the app connected to: like a real one, they stop advertising.
+    private var connected: Set<String> = []
     private var advertisingTimer: DispatchSourceTimer?
 
     /// - Parameters:
@@ -170,8 +172,37 @@ final class RelaxedReplayResponder: ReplayResponder {
         return Array(data)
     }
 
+    /// CoreBluetooth answers each discoverCharacteristics on a service with every
+    /// characteristic discovered on it so far, so a recording of an app that asks
+    /// several times holds growing lists. The app's requests come in a different
+    /// order on every run (ErgData iterates a Set), and a short list leaves
+    /// characteristics it asked for undiscovered: every reply carries the
+    /// service's complete list, as the device's final state.
+    static func completingDiscoveredCharacteristics(_ entries: [ReplayScript.Entry]) -> [ReplayScript.Entry] {
+        func key(_ message: [String: Any]) -> String {
+            "\(message["id"] ?? "")|\(message["serviceId"] ?? "")"
+        }
+        let replies = entries.filter { $0.direction == .toClient && $0.type == "didDiscoverCharacteristics" }
+        var lists: [String: [Any]] = [:]
+        var seen: [String: Set<String>] = [:]
+        for reply in replies {
+            let service = key(reply.message)
+            for case let characteristic as [String: Any] in reply.message["characteristics"] as? [Any] ?? [] {
+                guard let id = characteristic["id"] as? String, seen[service, default: []].insert(id).inserted else { continue }
+                lists[service, default: []].append(characteristic)
+            }
+        }
+        return entries.map { entry in
+            guard entry.direction == .toClient, entry.type == "didDiscoverCharacteristics" else { return entry }
+            var message = entry.message
+            message["characteristics"] = lists[key(message)] ?? []
+            return ReplayScript.Entry(seq: entry.seq, timestamp: entry.timestamp, direction: entry.direction,
+                                      message: message, type: entry.type)
+        }
+    }
+
     private func prepare() {
-        let entries = script.entries
+        let entries = Self.completingDiscoveredCharacteristics(script.entries)
         var claimed = Set<Int>()
         var frames: [String: [UInt8]] = [:]
         var openFrames: [String: Request] = [:] // "<peripheral>|<response prefix>"
@@ -248,7 +279,12 @@ final class RelaxedReplayResponder: ReplayResponder {
         switch message["type"] as? String {
             case "scan": scanning = true
             case "stopScan": scanning = false
-            case "connect": (message["id"] as? String).map { advertising[$0] = nil }
+            case "connect":
+                if let id = message["id"] as? String {
+                    advertising[id] = nil
+                    connected.insert(id)
+                }
+            case "cancel": (message["id"] as? String).map { connected.remove($0) }
             default: break
         }
         guard let type = message["type"] as? String, Self.isRequest(type) else { return }
@@ -394,7 +430,7 @@ final class RelaxedReplayResponder: ReplayResponder {
                 }
             }
             send?(entry.message)
-            if entry.type == "didDiscover", let id = entry.message["id"] as? String {
+            if entry.type == "didDiscover", let id = entry.message["id"] as? String, !connected.contains(id) {
                 advertising[id] = entry.message
             }
             previousTimestamp = entry.timestamp
@@ -441,6 +477,7 @@ final class RelaxedReplayResponder: ReplayResponder {
         advertisingTimer = nil
         scanning = false
         advertising.removeAll()
+        connected.removeAll()
         isRunning = false
         isAnswering = false
         waiting = false

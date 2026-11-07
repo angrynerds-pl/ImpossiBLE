@@ -236,6 +236,8 @@ static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
     /// wait for a scan forever.
     NSDictionary *_activeScan;
     NSMutableDictionary<NSString *, NSDictionary *> *_advertising;
+    /// Peripherals the app connected to: like a real one, they stop advertising.
+    NSMutableSet<NSString *> *_connected;
     dispatch_source_t _advertisingTimer;
 }
 
@@ -256,6 +258,7 @@ static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
         _lastUsed = [NSMutableDictionary dictionary];
         _appFrames = [NSMutableDictionary dictionary];
         _advertising = [NSMutableDictionary dictionary];
+        _connected = [NSMutableSet set];
         _delayedT = -1;
         _accepting = YES;
         [self prepare:entries];
@@ -287,8 +290,41 @@ static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
 
 #pragma mark Preprocessing
 
+/// CoreBluetooth answers each discoverCharacteristics on a service with every
+/// characteristic discovered on it so far, so a recording of an app that asks
+/// several times holds growing lists. The app's requests come in a different
+/// order on every run (ErgData iterates a Set), and handing it a short list
+/// leaves characteristics it asked for undiscovered. Every reply therefore
+/// carries the service's complete list, as the device's final state.
+static void CBSReplayCompleteDiscoveredCharacteristics(NSArray<CBSReplayEntry *> *entries)
+{
+    NSMutableDictionary<NSString *, NSMutableArray *> *lists = [NSMutableDictionary dictionary];
+    NSMutableDictionary<NSString *, NSMutableSet *> *seen = [NSMutableDictionary dictionary];
+    for (CBSReplayEntry *entry in entries) {
+        if (entry.fromClient || ![entry.type isEqualToString:@"didDiscoverCharacteristics"]) continue;
+        NSString *key = [NSString stringWithFormat:@"%@|%@", entry.message[@"id"], entry.message[@"serviceId"]];
+        NSMutableArray *list = lists[key] ?: (lists[key] = [NSMutableArray array]);
+        NSMutableSet *ids = seen[key] ?: (seen[key] = [NSMutableSet set]);
+        for (NSDictionary *characteristic in entry.message[@"characteristics"]) {
+            id characteristicId = [characteristic isKindOfClass:NSDictionary.class] ? characteristic[@"id"] : nil;
+            if (characteristicId && ![ids containsObject:characteristicId]) {
+                [ids addObject:characteristicId];
+                [list addObject:characteristic];
+            }
+        }
+    }
+    for (CBSReplayEntry *entry in entries) {
+        if (entry.fromClient || ![entry.type isEqualToString:@"didDiscoverCharacteristics"]) continue;
+        NSString *key = [NSString stringWithFormat:@"%@|%@", entry.message[@"id"], entry.message[@"serviceId"]];
+        NSMutableDictionary *message = [entry.message mutableCopy];
+        message[@"characteristics"] = [lists[key] copy];
+        entry.message = message;
+    }
+}
+
 - (void)prepare:(NSArray<CBSReplayEntry *> *)entries
 {
+    CBSReplayCompleteDiscoveredCharacteristics(entries);
     NSMutableArray<CBSReplayRequest *> *requests = [NSMutableArray array];
     NSMutableArray<CBSReplayEntry *> *timeline = [NSMutableArray array];
     NSMutableIndexSet *claimed = [NSMutableIndexSet indexSet];
@@ -462,6 +498,9 @@ static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
         _activeScan = nil;
     } else if ([type isEqual:@"connect"] && [message[@"id"] isKindOfClass:NSString.class]) {
         [_advertising removeObjectForKey:message[@"id"]];
+        [_connected addObject:message[@"id"]];
+    } else if ([type isEqual:@"cancel"] && [message[@"id"] isKindOfClass:NSString.class]) {
+        [_connected removeObject:message[@"id"]];
     }
     if (![type isKindOfClass:NSString.class] || !CBSReplayIsRequest(type)) return;
 
@@ -610,7 +649,8 @@ static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
         }
 
         _deliver(entry.message);
-        if ([entry.type isEqual:@"didDiscover"] && [entry.message[@"id"] isKindOfClass:NSString.class]) {
+        if ([entry.type isEqual:@"didDiscover"] && [entry.message[@"id"] isKindOfClass:NSString.class]
+            && ![_connected containsObject:entry.message[@"id"]]) {
             _advertising[entry.message[@"id"]] = entry.message;
         }
         _previousTimestamp = entry.timestamp;
@@ -690,6 +730,7 @@ static const NSTimeInterval kCBSReplayAdvertisingInterval = 1.0;
     }
     _scanning = NO;
     [_advertising removeAllObjects];
+    [_connected removeAllObjects];
     _running = NO;
     _waiting = NO;
     _waitDeadline = nil;

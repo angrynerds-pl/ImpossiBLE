@@ -120,6 +120,28 @@ final class ReplayRelaxedTests: XCTestCase {
         XCTAssertEqual(sent.count(of: "didDiscover"), 1)
     }
 
+    func testEveryDiscoveredCharacteristicsReplyCarriesTheServicesFullList() {
+        // CoreBluetooth answered three discoverCharacteristics on one service with growing lists;
+        // the app asks in another order next time, so each reply must hold all of them.
+        func characteristic(_ uuid: String) -> [String: Any] {
+            ["id": "\(Self.control):\(uuid):0", "uuid": uuid, "properties": 2]
+        }
+        func reply(_ seq: Int, _ uuids: [String]) -> ReplayScript.Entry {
+            ReplayScript.Entry(seq: seq, timestamp: Date(), direction: .toClient,
+                               message: ["type": "didDiscoverCharacteristics", "id": Self.peripheral, "serviceId": Self.control,
+                                         "characteristics": uuids.map(characteristic), "error": ""],
+                               type: "didDiscoverCharacteristics")
+        }
+        let entries = [reply(1, ["CE060011"]), reply(2, ["CE060011", "CE060018"]), reply(3, ["CE060011", "CE060018", "CE060015"])]
+
+        let completed = RelaxedReplayResponder.completingDiscoveredCharacteristics(entries)
+
+        for entry in completed {
+            let uuids = (entry.message["characteristics"] as? [[String: Any]])?.compactMap { $0["uuid"] as? String }
+            XCTAssertEqual(uuids, ["CE060011", "CE060018", "CE060015"])
+        }
+    }
+
     func testAFileWithNothingForTheAppIsRejected() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("replay-\(UUID().uuidString).json")
         defer { try? FileManager.default.removeItem(at: url) }
