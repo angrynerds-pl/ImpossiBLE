@@ -13,7 +13,9 @@ struct ReplayOptions: Equatable {
 
     static let speeds: [Double] = [1, 2, 5, 10]
 
-    var matching: Matching = .strict
+    /// Relaxed by default: a recording handed over for reproduction comes from
+    /// a real app run, whose polling and ordering differ every time.
+    var matching: Matching = .relaxed
     /// Divides every recorded delay; the wait for the app is not scaled.
     var speed: Double = 1
     /// Moves a Concept2 PM5's clock to the time of each run, so a replayed

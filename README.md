@@ -164,11 +164,11 @@ A recording only contains what the app itself sent and received; commands sent t
 - notifications follow the recorded timeline, which only waits for the first request of each kind;
 - PM5 CSAFE commands are matched by command structure, ignoring their data. Other request/response characteristic pairs can be named with `IMPOSSIBLE_REPLAY_CHANNELS=<req-uuid-prefix>:<resp-uuid-prefix>`.
 
-The result is logged (`ImpossiBLE: replay passed` / `FAILED — …`). It is also posted as the Darwin notifications `com.impossible.replay.passed` / `com.impossible.replay.failed`, which the test runner can wait for. Posting `com.impossible.replay.restart` restarts the recording from the top.
+The result is logged (`ImpossiBLE: replay passed` / `FAILED — …`). It is also posted as the Darwin notifications `com.impossible.replay.passed` / `com.impossible.replay.failed`, which the test runner can wait for; with `IMPOSSIBLE_REPLAY_STATUS_FILE` set to a path, the outcome and its reason are written there as JSON first (`{"state": "failed", "detail": "…"}`), including a recording that could not be loaded. Posting `com.impossible.replay.restart` restarts the recording from the top.
 
 When replaying a Concept2 PM5, ImpossiBLE moves the PM5's clock to the time of the replay: workout summaries and the CSAFE date/time and logged-workout replies get the current date and time, and everything else stays byte for byte. That makes a replayed workout a new one, so the Concept2 Logbook does not reject it as a duplicate of the recorded one. Set `IMPOSSIBLE_REPLAY_PM5_TIME=recorded` to keep the recorded times.
 
-For manual checks against a simulator, the Mac app's **Replay** mode offers the same: drop a recording on the panel, pick Strict or Relaxed (the panel explains each), a speed, and whether to move the PM5 clock to now, then press **Start** — loading a file does not start it. While started, each run (every app connection, or the restart button) starts from the top; **Stop** returns to ready.
+For manual checks against a simulator, the Mac app's **Replay** mode offers the same: drop a recording on the panel, pick Strict or Relaxed (the panel explains each; Relaxed is the default), a speed, and whether to move the PM5 clock to now, then press **Start** — loading a file does not start it. While started, each run (every app connection, or the restart button) starts from the top; **Stop** returns to ready.
 
 The same options are available in code with `ImpossiBLESetReplayOptions(speed, .relaxed)`, called before `ImpossiBLESetupReplay`.
 

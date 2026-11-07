@@ -70,7 +70,11 @@ extern NSString *const ImpossiBLEReplayRestartNotification;
 
 /// Posted on the Darwin notify center when a replay passes or fails, so a UI
 /// test — another process — can wait for the result. The reason is logged
-/// (`ImpossiBLE: replay FAILED — …`); Darwin notifications carry no payload.
+/// (`ImpossiBLE: replay FAILED — …`); Darwin notifications carry no payload,
+/// so a replay started from `IMPOSSIBLE_REPLAY_RECORDING` also writes
+/// `{state, detail, timestamp}` JSON to `IMPOSSIBLE_REPLAY_STATUS_FILE`, when
+/// set, before posting. A recording that fails to load posts `failed` too,
+/// with detail `setup failed: …`.
 extern NSString *const ImpossiBLEReplayPassedNotification;
 extern NSString *const ImpossiBLEReplayFailedNotification;
 

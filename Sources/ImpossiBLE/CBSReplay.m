@@ -165,6 +165,22 @@ static NSArray<CBSReplayEntry *> *CBSReplayLoadScript(NSString *path, NSError **
 #pragma mark - Player
 
 static ImpossiBLEReplayStatusHandler gStatusHandler;
+/// `IMPOSSIBLE_REPLAY_STATUS_FILE`: where a replay started from the environment
+/// writes its outcome, since a Darwin notification carries no reason.
+static NSString *gStatusFilePath;
+
+static void CBSReplayWriteStatusFile(NSString *state, NSString *detail)
+{
+    NSString *path = gStatusFilePath;
+    if (path.length == 0) return;
+    NSISO8601DateFormatter *formatter = [NSISO8601DateFormatter new];
+    formatter.formatOptions |= NSISO8601DateFormatWithFractionalSeconds;
+    NSDictionary *status = @{@"state": state, @"detail": detail ?: @"", @"timestamp": [formatter stringFromDate:[NSDate date]]};
+    NSData *data = [NSJSONSerialization dataWithJSONObject:status options:NSJSONWritingPrettyPrinted error:nil];
+    if (![data writeToFile:path options:NSDataWritingAtomic error:nil]) {
+        NSLog(@"ImpossiBLE: could not write the replay status to %@", path);
+    }
+}
 
 void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
 {
@@ -180,8 +196,9 @@ void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
             break;
     }
     // A UI test runs in another process; Darwin notifications are what it
-    // can observe.
+    // can observe, and the status file, written first, tells it why.
     if (state == ImpossiBLEReplayStatePassed || state == ImpossiBLEReplayStateFailed) {
+        CBSReplayWriteStatusFile(state == ImpossiBLEReplayStatePassed ? @"passed" : @"failed", detail);
         CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
                                              (__bridge CFStringRef)(state == ImpossiBLEReplayStatePassed
                                                                     ? ImpossiBLEReplayPassedNotification
@@ -562,6 +579,7 @@ void CBSReplayStartFromEnvironment(void)
     NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
     NSString *path = environment[@"IMPOSSIBLE_REPLAY_RECORDING"];
     if (path.length == 0) return;
+    gStatusFilePath = [environment[@"IMPOSSIBLE_REPLAY_STATUS_FILE"] copy];
 
     double speed = environment[@"IMPOSSIBLE_REPLAY_SPEED"].doubleValue;
     NSString *mode = environment[@"IMPOSSIBLE_REPLAY_MODE"].lowercaseString;
@@ -575,6 +593,9 @@ void CBSReplayStartFromEnvironment(void)
     NSError *error = nil;
     if (!ImpossiBLESetupReplay(path, &error) || !ImpossiBLEStartReplay(&error)) {
         NSLog(@"ImpossiBLE: replay from IMPOSSIBLE_REPLAY_RECORDING failed: %@", error.localizedDescription);
+        CBSReplayWriteStatusFile(@"failed", [@"setup failed: " stringByAppendingString:error.localizedDescription ?: @"unknown error"]);
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             (__bridge CFStringRef)ImpossiBLEReplayFailedNotification, NULL, NULL, true);
         return;
     }
     // A UI test runs in another process and cannot call into this one; a Darwin
