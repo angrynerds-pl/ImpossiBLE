@@ -27,10 +27,25 @@ static double gSpeed = 1;
 static ImpossiBLEReplayMatching gMatching = ImpossiBLEReplayMatchingStrict;
 static BOOL gPM5CurrentTime = YES;
 
+/// A replay setting: the environment variable `name`, else the launch argument
+/// pair `-name value`. Launch arguments are for tools that start the app with
+/// arguments but cannot set its environment (e2e frameworks driving an
+/// unmodified app); `simctl launch` and XCUIApplication can do either.
+static NSString *CBSReplaySetting(NSString *name)
+{
+    NSProcessInfo *process = NSProcessInfo.processInfo;
+    NSString *value = process.environment[name];
+    if (value.length > 0) return value;
+    NSArray<NSString *> *arguments = process.arguments;
+    NSUInteger flag = [arguments indexOfObject:[@"-" stringByAppendingString:name]];
+    if (flag != NSNotFound && flag + 1 < arguments.count) return arguments[flag + 1];
+    return nil;
+}
+
 /// Request → response characteristic UUID prefixes for relaxed replay.
 static NSDictionary<NSString *, NSString *> *CBSReplayChannels(void)
 {
-    NSString *configured = NSProcessInfo.processInfo.environment[@"IMPOSSIBLE_REPLAY_CHANNELS"];
+    NSString *configured = CBSReplaySetting(@"IMPOSSIBLE_REPLAY_CHANNELS");
     if (configured.length == 0) {
         // Concept2 PM5: CSAFE commands are written to CE060021 and answered
         // with notifications on CE060022.
@@ -171,7 +186,7 @@ static void CBSReplayTrace(NSString *arrow, NSDictionary *message)
 {
     static BOOL enabled;
     static dispatch_once_t once;
-    dispatch_once(&once, ^{ enabled = NSProcessInfo.processInfo.environment[@"IMPOSSIBLE_REPLAY_DEBUG"].length > 0; });
+    dispatch_once(&once, ^{ enabled = CBSReplaySetting(@"IMPOSSIBLE_REPLAY_DEBUG").length > 0; });
     if (!enabled) return;
     NSMutableString *line = [NSMutableString stringWithString:[message[@"type"] description] ?: @"?"];
     NSString *characteristic = message[@"characteristicId"];
@@ -609,19 +624,18 @@ static void CBSReplayRestart(CFNotificationCenterRef center, void *observer, CFN
 
 void CBSReplayStartFromEnvironment(void)
 {
-    NSDictionary<NSString *, NSString *> *environment = NSProcessInfo.processInfo.environment;
-    NSString *path = environment[@"IMPOSSIBLE_REPLAY_RECORDING"];
+    NSString *path = CBSReplaySetting(@"IMPOSSIBLE_REPLAY_RECORDING");
     if (path.length == 0) return;
-    gStatusFilePath = [environment[@"IMPOSSIBLE_REPLAY_STATUS_FILE"] copy];
+    gStatusFilePath = [CBSReplaySetting(@"IMPOSSIBLE_REPLAY_STATUS_FILE") copy];
 
-    double speed = environment[@"IMPOSSIBLE_REPLAY_SPEED"].doubleValue;
-    NSString *mode = environment[@"IMPOSSIBLE_REPLAY_MODE"].lowercaseString;
+    double speed = CBSReplaySetting(@"IMPOSSIBLE_REPLAY_SPEED").doubleValue;
+    NSString *mode = CBSReplaySetting(@"IMPOSSIBLE_REPLAY_MODE").lowercaseString;
     if (mode.length > 0 && ![mode isEqualToString:@"strict"] && ![mode isEqualToString:@"relaxed"]) {
         NSLog(@"ImpossiBLE: ignoring IMPOSSIBLE_REPLAY_MODE=%@ (strict or relaxed)", mode);
     }
     ImpossiBLESetReplayOptions(speed > 0 ? speed : 1,
                                [mode isEqualToString:@"relaxed"] ? ImpossiBLEReplayMatchingRelaxed : ImpossiBLEReplayMatchingStrict);
-    ImpossiBLESetReplayPM5CurrentTime(![environment[@"IMPOSSIBLE_REPLAY_PM5_TIME"].lowercaseString isEqualToString:@"recorded"]);
+    ImpossiBLESetReplayPM5CurrentTime(![CBSReplaySetting(@"IMPOSSIBLE_REPLAY_PM5_TIME").lowercaseString isEqualToString:@"recorded"]);
 
     NSError *error = nil;
     if (!ImpossiBLESetupReplay(path, &error) || !ImpossiBLEStartReplay(&error)) {

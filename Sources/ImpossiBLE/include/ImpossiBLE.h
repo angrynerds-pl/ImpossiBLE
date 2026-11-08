@@ -56,7 +56,9 @@ BOOL ImpossiBLEIsProviderConnected(void);
 ///
 /// A UI test does not need the app to call this: launching the app with the
 /// `IMPOSSIBLE_REPLAY_RECORDING` environment variable set to a recording path
-/// sets up and starts that replay when the library loads.
+/// sets up and starts that replay when the library loads. Every
+/// `IMPOSSIBLE_REPLAY_*` setting may instead be a launch argument pair
+/// (`-IMPOSSIBLE_REPLAY_RECORDING <path>`); the environment wins.
 BOOL ImpossiBLESetupReplay(NSString *path, NSError * _Nullable * _Nullable error);
 
 /// Darwin notification that restarts a replay started from

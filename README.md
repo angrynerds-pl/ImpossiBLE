@@ -157,6 +157,8 @@ app.launchEnvironment["IMPOSSIBLE_REPLAY_SPEED"] = "10"       // default: 1 (rec
 app.launch()
 ```
 
+Every `IMPOSSIBLE_REPLAY_*` setting can also be passed as a launch argument pair, `-IMPOSSIBLE_REPLAY_RECORDING /path/to/recording.json`, for tools that start the app with arguments but cannot set its environment (e2e frameworks driving an unmodified app). The environment variable wins when both are set.
+
 A recording only contains what the app itself sent and received; commands sent through the PM5 remote are left out.
 
 **Strict** replay waits for every recorded app message, in order. Use it for apps whose traffic is the same on every run. **Relaxed** replay is for apps like a rowing app that polls on timers, subscribes in varying order, or writes the current date:
