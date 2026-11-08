@@ -175,6 +175,8 @@ The bridge can also record its wire traffic as JSON, off by default and never pe
 
 Agents drive recording with `passthrough_record_start {label?}` (Passthrough mode only; `label` becomes the sanitised file prefix, `MockServer.recordingPrefix`), `passthrough_record_stop` (returns `path` and `entryCount`), and `passthrough_recordings_list`; `get_status` carries `passthroughRecording`. These share state with the panel's Record button.
 
+Replay mode is driven the same way, sharing state with the panel's drop zone and controls: `replay_load {path}` (`MockServer.loadReplayScript`; an invalid file is an error), `replay_set_options {matching?, speed?, pm5CurrentTime?}`, `replay_start` (needs a valid recording and replay mode), `replay_stop`, `replay_status`; `get_status` carries `replay`. An e2e test that drives an unmodified app uses these to supply its PM. `replayRun` reaches main asynchronously from the I/O queue, so until started the tools report `ready`/`idle` from the loaded recording rather than a possibly stale run. JSON `true`/`false` arrive as `NSNumber` too, so number arguments are checked against `CFBooleanGetTypeID`.
+
 On a provider-connection drop the simulator-side shim closes open L2CAP channels and synthesizes `didDisconnectPeripheral` for every owned peripheral (`cbs_handle_daemon_disconnect`), so the host app re-establishes instead of hanging on a dead channel.
 
 ## Known Follow-ups

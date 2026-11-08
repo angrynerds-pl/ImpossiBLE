@@ -829,6 +829,73 @@ final class ProviderTools {
             destructive: false,
             run: { tools, _, _, completion in tools.listRecordings(completion: completion) }
         ),
+        // MARK: Replay
+        ToolDefinition(
+            name: "replay_load",
+            description: """
+                Load a recording (a Passthrough recording JSON) for Replay mode, as dropping it on the panel does. \
+                It is validated but not played until replay_start, so options can be set first; loading stops a \
+                started replay. Returns replay_status.
+                """,
+            inputSchema: schema([
+                "path": ["type": "string", "description": "Absolute path of the recording JSON"],
+            ], required: ["path"]),
+            readOnly: false,
+            destructive: false,
+            run: sync { tools, args in try tools.loadReplay(args) }
+        ),
+        ToolDefinition(
+            name: "replay_set_options",
+            description: """
+                How Replay mode plays the loaded recording; omitted options keep their value. Persisted. \
+                matching: relaxed (default; app requests answered on demand, PM5 data follows the recording — for \
+                real app sessions) or strict (every recorded app message expected in order). speed divides the \
+                recorded delays. pm5CurrentTime moves a PM5's clock to the time of the run, so a saved workout is \
+                a new Logbook result. A running replay restarts with the new options.
+                """,
+            inputSchema: schema([
+                "matching": ["type": "string", "enum": ["relaxed", "strict"]],
+                "speed": ["type": "number", "description": "Greater than 0; 1 plays at recorded speed"],
+                "pm5CurrentTime": ["type": "boolean"],
+            ]),
+            readOnly: false,
+            destructive: false,
+            run: sync { tools, args in try tools.setReplayOptions(args) }
+        ),
+        ToolDefinition(
+            name: "replay_start",
+            description: """
+                Start playing the loaded recording (needs replay mode, see set_mode): to the connected simulator \
+                app right away, and from the top for every app that connects afterwards. Returns replay_status.
+                """,
+            inputSchema: schema(),
+            readOnly: false,
+            destructive: false,
+            run: sync { tools, _ in try tools.startReplay() }
+        ),
+        ToolDefinition(
+            name: "replay_stop",
+            description: "Stop answering the app; the recording stays loaded and ready. Returns replay_status.",
+            inputSchema: schema(),
+            readOnly: false,
+            destructive: false,
+            run: sync { tools, _ in
+                tools.server.stopReplay()
+                return tools.replayStatus()
+            }
+        ),
+        ToolDefinition(
+            name: "replay_status",
+            description: """
+                The loaded recording, the options, whether the replay is started, and the current run: idle, \
+                ready, waitingForClient, running (step of total, the app request it waits for), passed, or \
+                failed (with the reason).
+                """,
+            inputSchema: schema(),
+            readOnly: true,
+            destructive: false,
+            run: sync { tools, _ in tools.replayStatus() }
+        ),
         ToolDefinition(
             name: "terminate_simulator_app",
             description: """
@@ -870,6 +937,11 @@ final class ProviderTools {
             "passthroughRecording": [
                 "recording": server.passthroughRecording.isRecording,
                 "path": server.passthroughRecording.path.map { $0 as Any } ?? NSNull(),
+            ],
+            "replay": [
+                "recording": server.replayScript.map { $0.url.path as Any } ?? NSNull(),
+                "started": server.replayStarted,
+                "run": replayRun(),
             ],
             "lastActivity": transport.lastActivity,
         ]
@@ -1379,6 +1451,104 @@ final class ProviderTools {
     }
 
     // MARK: - Passthrough
+
+    // MARK: - Replay
+
+    private func loadReplay(_ args: [String: Any]) throws -> [String: Any] {
+        guard let path = args["path"] as? String, !path.isEmpty else {
+            throw ToolError("path must be the recording's absolute path")
+        }
+        let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw ToolError("No file at \(url.path)")
+        }
+        server.loadReplayScript(from: url)
+        if case .invalid(let reason) = server.replayScript?.validity {
+            throw ToolError("Not a replayable recording: \(reason)")
+        }
+        return replayStatus()
+    }
+
+    private func setReplayOptions(_ args: [String: Any]) throws -> [String: Any] {
+        var options = server.replayOptions
+        if let raw = args["matching"] {
+            guard let name = raw as? String, let matching = ReplayOptions.Matching(rawValue: name.lowercased()) else {
+                throw ToolError("matching must be relaxed or strict")
+            }
+            options.matching = matching
+        }
+        if let raw = args["speed"] {
+            // JSON true/false also arrive as NSNumber; only a real number is a speed.
+            guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+                  case let speed = number.doubleValue, speed > 0 else {
+                throw ToolError("speed must be a number greater than 0")
+            }
+            options.speed = speed
+        }
+        if let raw = args["pm5CurrentTime"] {
+            guard let value = raw as? Bool else { throw ToolError("pm5CurrentTime must be true or false") }
+            options.pm5CurrentTime = value
+        }
+        server.setReplayOptions(options)
+        return replayStatus()
+    }
+
+    private func startReplay() throws -> [String: Any] {
+        guard server.replayScript?.isValid == true else {
+            throw ToolError("No valid recording is loaded; call replay_load first")
+        }
+        guard modeController.mode == .replay else {
+            throw ToolError("Replay plays in replay mode (now \(modeController.mode.rawValue)); call set_mode replay first")
+        }
+        server.startReplay()
+        return replayStatus()
+    }
+
+    func replayStatus() -> [String: Any] {
+        var loaded: Any = NSNull()
+        if let script = server.replayScript {
+            switch script.validity {
+                case .valid(let entries, let fromClient, let toClient):
+                    loaded = ["path": script.url.path, "valid": true, "entries": entries,
+                              "fromClient": fromClient, "toClient": toClient]
+                case .invalid(let reason):
+                    loaded = ["path": script.url.path, "valid": false, "error": reason]
+            }
+        }
+        let options = server.replayOptions
+        return [
+            "mode": modeController.mode.rawValue,
+            "recording": loaded,
+            "options": ["matching": options.matching.rawValue, "speed": options.speed,
+                        "pm5CurrentTime": options.pm5CurrentTime],
+            "started": server.replayStarted,
+            "run": replayRun(),
+            "simulatorApp": server.transport.connectedClient.map(Self.client) ?? NSNull(),
+        ]
+    }
+
+    /// The run as of now. `replayRun` reaches main asynchronously from the I/O
+    /// queue, so right after a load or stop it can still show the old run;
+    /// until started there is no run, only a recording that is ready or not.
+    private func replayRun() -> [String: Any] {
+        guard server.replayStarted else {
+            return ["state": server.replayScript?.isValid == true ? "ready" : "idle"]
+        }
+        return Self.describe(server.replayRun)
+    }
+
+    private static func describe(_ run: ReplayRunStatus) -> [String: Any] {
+        switch run {
+            case .idle: ["state": "idle"]
+            case .ready: ["state": "ready"]
+            case .waitingForClient: ["state": "waitingForClient"]
+            case .running(let step, let total, let awaiting):
+                ["state": "running", "step": step, "total": total, "awaiting": awaiting.map { $0 as Any } ?? NSNull()]
+            case .passed(let total): ["state": "passed", "total": total]
+            case .failed(let step, let total, let reason):
+                ["state": "failed", "step": step, "total": total, "reason": reason]
+        }
+    }
 
     private func startRecording(_ args: [String: Any]) throws -> [String: Any] {
         guard modeController.mode == .passthrough else {

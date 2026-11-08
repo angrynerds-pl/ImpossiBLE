@@ -336,6 +336,10 @@ Working-set edits are saved immediately but only change a stored configuration t
 | `passthrough_record_start` | `label`? | Records what the app sends and receives, as a replayable JSON file in `/tmp/impossible-passthrough-recordings` named `<label>-<date>-…json`. PM5 remote traffic is left out. See [Recording and Replaying](#recording-and-replaying). |
 | `passthrough_record_stop` | — | Stops recording; returns the file and its entry count. |
 | `passthrough_recordings_list` | — | Recordings on disk, newest first, with size and entry count. |
+| `replay_load` | `path` | Loads and validates a recording for Replay mode, as dropping it on the panel does. It does not play until `replay_start`. |
+| `replay_set_options` | `matching`?, `speed`?, `pm5CurrentTime`? | Relaxed or strict, the speed, and whether a PM5's clock moves to now. Persisted. |
+| `replay_start` / `replay_stop` | — | Starts playing the loaded recording to the app (needs replay mode, see `set_mode`), or stops answering it. |
+| `replay_status` | — | The loaded recording, options, and the run: ready, running (step, awaited request), passed, or failed with the reason. |
 | `terminate_simulator_app` | — | Sends SIGTERM to the connected simulator app, e.g. to restart it with a clean Bluetooth state. |
 
 **PM5 remote** (passthrough, with the app connected to a Concept2 PM5 — see [PM5 Remote](#pm5-remote))

@@ -86,7 +86,7 @@ final class MCPSessionTests: XCTestCase {
         let names = tools.compactMap { $0["name"] as? String }
 
         XCTAssertEqual(Set(names).count, names.count)
-        for expected in ["set_mode", "capture_save", "set_characteristic_value", "mock_activity", "inject_failure", "export_configuration", "passthrough_record_start", "passthrough_record_stop", "passthrough_recordings_list"] {
+        for expected in ["set_mode", "capture_save", "set_characteristic_value", "mock_activity", "inject_failure", "export_configuration", "passthrough_record_start", "passthrough_record_stop", "passthrough_recordings_list", "replay_load", "replay_set_options", "replay_start", "replay_stop", "replay_status"] {
             XCTAssertTrue(names.contains(expected), expected)
         }
         for tool in tools {
@@ -177,6 +177,47 @@ final class MCPSessionTests: XCTestCase {
         XCTAssertEqual(MockServer.recordingPrefix(for: "pm5 just-row/2min"), "pm5-just-row-2min")
         XCTAssertEqual(MockServer.recordingPrefix(for: "../etc"), "etc")
         XCTAssertEqual(MockServer.recordingPrefix(for: String(repeating: "a", count: 100)).count, 64)
+    }
+
+    func testReplayLoadsSetsOptionsAndNeedsReplayModeToStart() throws {
+        let original = fixture.server.replayOptions
+        defer { fixture.server.setReplayOptions(original) }
+
+        XCTAssertEqual(call("replay_load", ["path": "/no/such/recording.json"])["isError"] as? Bool, true)
+
+        let url = fixture.directory.appendingPathComponent("recording.json")
+        try FileManager.default.createDirectory(at: fixture.directory, withIntermediateDirectories: true)
+        let entries: [[String: Any]] = [
+            ["seq": 1, "timestamp": "2026-11-08T10:00:00Z", "direction": "fromClient", "message": ["type": "scan"]],
+            ["seq": 2, "timestamp": "2026-11-08T10:00:01Z", "direction": "toClient",
+             "message": ["type": "didDiscover", "id": "A", "name": "PM5 431861513 Row"]],
+        ]
+        try JSONSerialization.data(withJSONObject: entries).write(to: url)
+
+        let loaded = result(call("replay_load", ["path": url.path]))
+        let recording = loaded["recording"] as? [String: Any]
+        XCTAssertEqual(recording?["valid"] as? Bool, true)
+        XCTAssertEqual(recording?["entries"] as? Int, 2)
+        XCTAssertEqual(loaded["started"] as? Bool, false)
+        XCTAssertEqual((loaded["run"] as? [String: Any])?["state"] as? String, "ready")
+
+        let options = result(call("replay_set_options", ["matching": "strict", "speed": 5, "pm5CurrentTime": false]))
+        XCTAssertEqual(options["options"] as? NSDictionary, ["matching": "strict", "speed": 5.0, "pm5CurrentTime": false])
+        XCTAssertEqual(call("replay_set_options", ["speed": 0])["isError"] as? Bool, true)
+        XCTAssertEqual(call("replay_set_options", ["speed": true])["isError"] as? Bool, true)
+        XCTAssertEqual((result(call("replay_set_options", ["speed": 1]))["options"] as? [String: Any])?["speed"] as? Double, 1)
+        XCTAssertEqual(call("replay_set_options", ["matching": "loose"])["isError"] as? Bool, true)
+
+        let refused = call("replay_start")
+        XCTAssertEqual(refused["isError"] as? Bool, true, "The fixture's mode is off")
+        XCTAssertFalse(fixture.server.replayStarted)
+    }
+
+    /// The JSON a successful tool call returned.
+    private func result(_ response: [String: Any], file: StaticString = #filePath, line: UInt = #line) -> [String: Any] {
+        XCTAssertNotEqual(response["isError"] as? Bool, true, "\(response)", file: file, line: line)
+        let text = (response["content"] as? [[String: Any]])?.first?["text"] as? String ?? ""
+        return (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] ?? [:]
     }
 
     func testRecordingEntryCountReadsTheArray() throws {
