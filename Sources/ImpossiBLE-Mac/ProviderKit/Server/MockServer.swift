@@ -422,6 +422,12 @@ public final class MockServer: ObservableObject {
     func startReplay() {
         guard replayScript?.isValid == true else { return }
         replayStarted = true
+        // The new run's ID reaches main only after the I/O queue built it; until
+        // then a status read (replay_start's own answer, a poll right after it)
+        // would still see the previous run's passed/failed. ID 0 is never a
+        // run's, so late statuses from the replaced responder are dropped too.
+        replayRunID = 0
+        replayRun = .waitingForClient
         transport.performOnIOQueue { [self] in
             replayStartedIO = true
             replaceReplayResponder()

@@ -229,6 +229,14 @@ static void CBSReplayWriteStatusFile(NSString *state, NSString *detail)
     }
 }
 
+/// A run has no outcome yet: a test that reads the file instead of waiting
+/// for the notification must not see the previous run's passed/failed.
+static void CBSReplayClearStatusFile(void)
+{
+    if (gStatusFilePath.length == 0) return;
+    [NSFileManager.defaultManager removeItemAtPath:gStatusFilePath error:nil];
+}
+
 void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
 {
     switch (state) {
@@ -615,6 +623,7 @@ static void CBSReplayRestart(CFNotificationCenterRef center, void *observer, CFN
                              const void *object, CFDictionaryRef userInfo)
 {
     NSError *error = nil;
+    CBSReplayClearStatusFile();
     if (!ImpossiBLEStartReplay(&error)) {
         NSLog(@"ImpossiBLE: replay restart failed: %@", error.localizedDescription);
         return;
@@ -627,6 +636,7 @@ void CBSReplayStartFromEnvironment(void)
     NSString *path = CBSReplaySetting(@"IMPOSSIBLE_REPLAY_RECORDING");
     if (path.length == 0) return;
     gStatusFilePath = [CBSReplaySetting(@"IMPOSSIBLE_REPLAY_STATUS_FILE") copy];
+    CBSReplayClearStatusFile();
 
     double speed = CBSReplaySetting(@"IMPOSSIBLE_REPLAY_SPEED").doubleValue;
     NSString *mode = CBSReplaySetting(@"IMPOSSIBLE_REPLAY_MODE").lowercaseString;

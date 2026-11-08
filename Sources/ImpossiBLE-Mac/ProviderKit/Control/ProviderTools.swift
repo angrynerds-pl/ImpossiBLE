@@ -855,7 +855,7 @@ final class ProviderTools {
                 """,
             inputSchema: schema([
                 "matching": ["type": "string", "enum": ["relaxed", "strict"]],
-                "speed": ["type": "number", "description": "Greater than 0; 1 plays at recorded speed"],
+                "speed": ["type": "number", "enum": ReplayOptions.speeds, "description": "Divides recorded delays; 1 plays at recorded speed"],
                 "pm5CurrentTime": ["type": "boolean"],
             ]),
             readOnly: false,
@@ -1480,13 +1480,18 @@ final class ProviderTools {
         if let raw = args["speed"] {
             // JSON true/false also arrive as NSNumber; only a real number is a speed.
             guard let number = raw as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
-                  case let speed = number.doubleValue, speed > 0 else {
-                throw ToolError("speed must be a number greater than 0")
+                  case let speed = number.doubleValue, ReplayOptions.speeds.contains(speed) else {
+                // The panel offers these speeds only; another one would leave its picker blank.
+                throw ToolError("speed must be one of \(ReplayOptions.speeds.map { "\(Int($0))" }.joined(separator: ", "))")
             }
             options.speed = speed
         }
         if let raw = args["pm5CurrentTime"] {
-            guard let value = raw as? Bool else { throw ToolError("pm5CurrentTime must be true or false") }
+            // 0 and 1 arrive as NSNumber too and would bridge to Bool; only JSON true/false count.
+            guard let number = raw as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else {
+                throw ToolError("pm5CurrentTime must be true or false")
+            }
+            let value = number.boolValue
             options.pm5CurrentTime = value
         }
         server.setReplayOptions(options)

@@ -98,6 +98,13 @@ final class ReplayRelaxedTests: XCTestCase {
         quiet.isInverted = true
         wait(for: [quiet], timeout: 1.5)
         XCTAssertEqual(sent.count(of: "didDiscover"), afterConnect)
+
+        // Released by the app, it advertises again, so a rescan finds it.
+        responder.handle(["type": "cancel", "id": Self.peripheral])
+        let again = expectation(description: "advertises after cancel")
+        again.isInverted = true
+        wait(for: [again], timeout: 1.5)
+        XCTAssertGreaterThan(sent.count(of: "didDiscover"), afterConnect)
     }
 
     func testANewRunToldOfTheAppsScanAdvertisesWithoutANewOne() {

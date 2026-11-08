@@ -97,6 +97,9 @@ final class RelaxedReplayResponder: ReplayResponder {
     private var advertising: [String: [String: Any]] = [:]
     /// Peripherals the app connected to: like a real one, they stop advertising.
     private var connected: Set<String> = []
+    /// Each peripheral's last advertisement, connected or not: a cancel puts it
+    /// back into `advertising`, as a real PM5 advertises again once released.
+    private var lastAdvertisement: [String: [String: Any]] = [:]
     private var advertisingTimer: DispatchSourceTimer?
 
     /// - Parameters:
@@ -284,7 +287,11 @@ final class RelaxedReplayResponder: ReplayResponder {
                     advertising[id] = nil
                     connected.insert(id)
                 }
-            case "cancel": (message["id"] as? String).map { connected.remove($0) }
+            case "cancel":
+                if let id = message["id"] as? String {
+                    connected.remove(id)
+                    if let advertisement = lastAdvertisement[id] { advertising[id] = advertisement }
+                }
             default: break
         }
         guard let type = message["type"] as? String, Self.isRequest(type) else { return }
@@ -430,8 +437,9 @@ final class RelaxedReplayResponder: ReplayResponder {
                 }
             }
             send?(entry.message)
-            if entry.type == "didDiscover", let id = entry.message["id"] as? String, !connected.contains(id) {
-                advertising[id] = entry.message
+            if entry.type == "didDiscover", let id = entry.message["id"] as? String {
+                lastAdvertisement[id] = entry.message
+                if !connected.contains(id) { advertising[id] = entry.message }
             }
             previousTimestamp = entry.timestamp
             position += 1
@@ -478,6 +486,7 @@ final class RelaxedReplayResponder: ReplayResponder {
         scanning = false
         advertising.removeAll()
         connected.removeAll()
+        lastAdvertisement.removeAll()
         isRunning = false
         isAnswering = false
         waiting = false

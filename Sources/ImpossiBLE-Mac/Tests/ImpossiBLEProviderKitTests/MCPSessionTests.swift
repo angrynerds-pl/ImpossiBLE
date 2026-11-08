@@ -205,12 +205,21 @@ final class MCPSessionTests: XCTestCase {
         XCTAssertEqual(options["options"] as? NSDictionary, ["matching": "strict", "speed": 5.0, "pm5CurrentTime": false])
         XCTAssertEqual(call("replay_set_options", ["speed": 0])["isError"] as? Bool, true)
         XCTAssertEqual(call("replay_set_options", ["speed": true])["isError"] as? Bool, true)
+        XCTAssertEqual(call("replay_set_options", ["speed": 3])["isError"] as? Bool, true, "Only the panel's speeds")
+        XCTAssertEqual(call("replay_set_options", ["pm5CurrentTime": 1])["isError"] as? Bool, true, "A number is not a Boolean")
         XCTAssertEqual((result(call("replay_set_options", ["speed": 1]))["options"] as? [String: Any])?["speed"] as? Double, 1)
         XCTAssertEqual(call("replay_set_options", ["matching": "loose"])["isError"] as? Bool, true)
 
         let refused = call("replay_start")
         XCTAssertEqual(refused["isError"] as? Bool, true, "The fixture's mode is off")
         XCTAssertFalse(fixture.server.replayStarted)
+
+        // A start never reports the previous run's outcome while the new run is being built.
+        fixture.server.startReplay()
+        XCTAssertTrue(fixture.server.replayStarted)
+        guard case .waitingForClient = fixture.server.replayRun else {
+            return XCTFail("Right after a start the run waits for the app, not \(fixture.server.replayRun)")
+        }
     }
 
     /// The JSON a successful tool call returned.
