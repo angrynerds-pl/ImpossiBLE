@@ -12,11 +12,11 @@ open class BluetoothLeScannerCompat internal constructor(private val scanner: ()
     fun startScan(filters: List<ScanFilter>?, settings: ScanSettings, callback: ScanCallback) {
         val core = scanner()
         val active = filters.orEmpty()
-        val names = active.mapNotNull { it.deviceName }
+        val specs = active.map { FilterSpec(it.deviceName, it.serviceUuid?.uuid?.toString()) }
         val subscription = ScanSubscription(
-            services = active.mapNotNull { it.serviceUuid?.uuid?.toString() },
+            services = wireServices(specs),
             reportDelayMs = settings.reportDelayMillis,
-            nameFilter = { name -> names.isEmpty() || name in names },
+            accept = { result -> accepts(specs, result) },
             onResult = { callback.onScanResult(ScanSettings.CALLBACK_TYPE_ALL_MATCHES, convert(it)) },
             onBatch = { batch -> callback.onBatchScanResults(batch.map(::convert).toMutableList()) },
         )
@@ -45,3 +45,16 @@ open class BluetoothLeScannerCompat internal constructor(private val scanner: ()
         fun getScanner(): BluetoothLeScannerCompat = instance
     }
 }
+
+internal class FilterSpec(val name: String?, val serviceUuid: String?)
+
+// The provider can only filter by service, so any filter without one makes the wire scan unfiltered.
+internal fun wireServices(specs: List<FilterSpec>): List<String> =
+    if (specs.any { it.serviceUuid == null }) emptyList() else specs.mapNotNull { it.serviceUuid }
+
+// Nordic semantics: a filter ANDs the fields it sets, the filter list ORs.
+internal fun accepts(specs: List<FilterSpec>, result: CoreScanResult): Boolean =
+    specs.isEmpty() || specs.any { spec ->
+        (spec.name == null || spec.name == result.name) &&
+            (spec.serviceUuid == null || result.record.serviceUuids.any { it.equals(spec.serviceUuid, ignoreCase = true) })
+    }

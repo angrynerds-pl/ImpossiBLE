@@ -19,8 +19,14 @@ class ScanTest {
         """{"type":"didDiscover","id":"$id","name":"$name","rssi":$rssi,"adv":{"kCBAdvDataLocalName":"$name"}}""",
     )
 
-    private fun sub(reportDelay: Long = 0, filter: (String?) -> Boolean = { true }) =
-        ScanSubscription(listOf("CE060000-43E5-11E4-916C-0800200C9A66"), reportDelay, filter, { singles += it }, { batches += it })
+    private fun sub(reportDelay: Long = 0, services: List<String> = listOf(PM5), filter: (ScanResult) -> Boolean = { true }) =
+        ScanSubscription(services, reportDelay, filter, { singles += it }, { batches += it })
+
+    private fun discoverWith(id: String, name: String, service: String) = f.incoming(
+        """{"type":"didDiscover","id":"$id","name":"$name","rssi":-50,"adv":{"kCBAdvDataLocalName":"$name","kCBAdvDataServiceUUIDs":["$service"]}}""",
+    )
+
+    private fun scans() = f.sent.filter { it.contains("\"type\":\"scan\"") }
 
     @Test
     fun `given a discovery, then the record carries name, expanded services, manufacturer id split and service data and no raw bytes`() {
@@ -85,7 +91,7 @@ class ScanTest {
 
     @Test
     fun `given a name filter, then non matching devices are dropped`() {
-        scanner.start(sub(filter = { it?.startsWith("PM5") == true }))
+        scanner.start(sub(filter = { it.name?.startsWith("PM5") == true }))
         discover("p", "PM5 1", -50)
         discover("q", "Other", -50)
         f.drain()
@@ -119,5 +125,54 @@ class ScanTest {
         scanner.onTransportUp()
         f.drain()
         assertThat(f.sent.filter { it.contains("\"type\":\"scan\"") }).hasSize(2)
+    }
+
+    @Test
+    fun `given a later subscription with other services, then the wire scan covers both and each only receives its own`() {
+        val pm5 = sub(services = listOf(PM5))
+        val hr = ScanSubscription(listOf(HR), 0, { true }, { hrResults += it }, {})
+        scanner.start(pm5)
+        scanner.start(hr)
+        discoverWith("a", "PM5", PM5)
+        discoverWith("b", "Strap", "180D")
+        f.drain()
+        assertThat(scans()).hasSize(2)
+        assertThat(scans().last()).contains(PM5)
+        assertThat(scans().last()).contains(HR)
+        assertThat(singles.map { it.name }).containsExactly("PM5")
+        assertThat(hrResults.map { it.name }).containsExactly("Strap")
+    }
+
+    @Test
+    fun `given an unfiltered subscription joins, then the wire scan becomes unfiltered and narrows again when it stops`() {
+        val pm5 = sub(services = listOf(PM5))
+        val all = sub(services = emptyList())
+        scanner.start(pm5)
+        scanner.start(all)
+        f.drain()
+        assertThat(scans().last()).contains("\"services\":[]")
+        scanner.stop(all)
+        f.drain()
+        assertThat(scans().last()).contains(PM5)
+        assertThat(f.sent.last()).doesNotContain("stopScan")
+    }
+
+    @Test
+    fun `given the first subscriber stops while another remains, then the wire scan narrows to the remaining services`() {
+        val pm5 = sub(services = listOf(PM5))
+        val hr = sub(services = listOf(HR))
+        scanner.start(pm5)
+        scanner.start(hr)
+        scanner.stop(pm5)
+        f.drain()
+        assertThat(scans().last()).contains(HR)
+        assertThat(scans().last()).doesNotContain(PM5)
+    }
+
+    private val hrResults = java.util.concurrent.CopyOnWriteArrayList<ScanResult>()
+
+    private companion object {
+        const val PM5 = "CE060000-43E5-11E4-916C-0800200C9A66"
+        const val HR = "0000180d-0000-1000-8000-00805f9b34fb"
     }
 }
