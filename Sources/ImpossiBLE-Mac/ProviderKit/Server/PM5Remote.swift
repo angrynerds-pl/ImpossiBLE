@@ -481,7 +481,10 @@ final class PM5RemoteEngine {
     var bridgeAcksWriteWithoutResponse = false
 
     private var peripherals: [String: Peripheral] = [:]
-    private var unconsumedWriteAcks: [String: Int] = [:]
+    /// Write-without-response acks still to come from the bridge per command
+    /// characteristic, in write order; `true` marks an ack for our own write.
+    /// The bridge acks in the order it sends, so ownership is the queue head.
+    private var pendingWriteAcks: [String: [Bool]] = [:]
     private var names: [String: String] = [:]
     private var queue: [PM5Injection] = []
     private var active: Active?
@@ -529,6 +532,7 @@ final class PM5RemoteEngine {
             return true
         }
         trackAppWrite(message, peripheralID: peripheralID)
+        expectAck(forAppWrite: message, characteristicID: characteristicID)
         record("app→pm", message, "passed")
         return false
     }
@@ -559,7 +563,7 @@ final class PM5RemoteEngine {
                     finish(.failure(ToolError("The PM5 disconnected")))
                 }
                 if let command = peripherals[id]?.commandCharacteristicID {
-                    unconsumedWriteAcks[command] = nil
+                    pendingWriteAcks[command] = nil
                 }
                 peripherals[id] = nil
                 publishConnections()
@@ -602,7 +606,7 @@ final class PM5RemoteEngine {
         }
         failQueued(ToolError("The passthrough connection was reset"))
         peripherals.removeAll()
-        unconsumedWriteAcks.removeAll()
+        pendingWriteAcks.removeAll()
         publishConnections()
     }
 
@@ -668,7 +672,7 @@ final class PM5RemoteEngine {
         )
         note("PM5 remote: \(injection.label)")
         if injection.writeWithoutResponse && bridgeAcksWriteWithoutResponse {
-            unconsumedWriteAcks[peripheral.commandCharacteristicID!, default: 0] += chunks.count
+            pendingWriteAcks[peripheral.commandCharacteristicID!, default: []] += Array(repeating: true, count: chunks.count)
         }
         for chunk in chunks {
             record("remote→pm", chunk, injection.label)
@@ -693,9 +697,10 @@ final class PM5RemoteEngine {
 
     private func consumeWriteConfirmation(_ message: [String: Any], peripheralID: String) -> Bool {
         if message["writeType"] as? Int == 1, let characteristicID = message["characteristicId"] as? String,
-           let remaining = unconsumedWriteAcks[characteristicID], remaining > 0 {
-            unconsumedWriteAcks[characteristicID] = remaining == 1 ? nil : remaining - 1
-            return true
+           var owners = pendingWriteAcks[characteristicID], !owners.isEmpty {
+            let ours = owners.removeFirst()
+            pendingWriteAcks[characteristicID] = owners.isEmpty ? nil : owners
+            return ours
         }
         guard var current = active, current.peripheralID == peripheralID,
               message["characteristicId"] as? String == current.commandCharacteristicID,
@@ -772,6 +777,9 @@ final class PM5RemoteEngine {
             for message in current.heldAppMessages {
                 record("app→pm", message, "released")
                 trackAppWrite(message, peripheralID: current.peripheralID)
+                if let characteristicID = message["characteristicId"] as? String {
+                    expectAck(forAppWrite: message, characteristicID: characteristicID)
+                }
                 sendToBridge(message)
             }
         }
@@ -837,6 +845,12 @@ final class PM5RemoteEngine {
         nextTraceSequence += 1
         if trace.count > Self.traceCapacity {
             trace.removeFirst(trace.count - Self.traceCapacity)
+        }
+    }
+
+    private func expectAck(forAppWrite message: [String: Any], characteristicID: String) {
+        if bridgeAcksWriteWithoutResponse && message["writeType"] as? Int == 1 {
+            pendingWriteAcks[characteristicID, default: []].append(false)
         }
     }
 

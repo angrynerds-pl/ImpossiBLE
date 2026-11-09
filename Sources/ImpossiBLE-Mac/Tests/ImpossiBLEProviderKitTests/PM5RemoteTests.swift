@@ -164,6 +164,25 @@ final class PM5RemoteEngineTests: XCTestCase {
         XCTAssertFalse(engine.bridgeMessage(writeAck()), "A later ack is the app's own")
     }
 
+    func testAckOwnershipFollowsWriteOrderWhenAnAppWriteIsStillQueuedInTheBridge() {
+        engine.bridgeAcksWriteWithoutResponse = true
+        connectPM5()
+        // The app's write sits in the bridge queue (no ack yet); its reply is already in.
+        var appWriteWithoutResponse = appWrite([0xF1, 0x00, 0xF2])
+        appWriteWithoutResponse["writeType"] = 1
+        XCTAssertFalse(engine.appMessage(appWriteWithoutResponse))
+        XCTAssertFalse(engine.bridgeMessage(response([0xF1, 0x81, 0x81, 0xF2])))
+
+        let done = expectation(description: "done")
+        submitWriteWithoutResponse(done)
+        wait(for: [done], timeout: 1)
+
+        // The bridge drains in write order: the app's ack first, then ours.
+        XCTAssertFalse(engine.bridgeMessage(writeAck()), "The app's own ack reaches the app")
+        XCTAssertTrue(engine.bridgeMessage(writeAck()), "Ours is consumed")
+        XCTAssertFalse(engine.bridgeMessage(writeAck()), "Nothing left to swallow")
+    }
+
     func testDisconnectDropsAcksTheBridgeWillNeverSend() {
         engine.bridgeAcksWriteWithoutResponse = true
         connectPM5()
