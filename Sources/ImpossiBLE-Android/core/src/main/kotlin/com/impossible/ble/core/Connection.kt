@@ -157,8 +157,9 @@ class Connection(
             n = try {
                 input.read(buffer)
             } catch (ignored: SocketTimeoutException) {
-                if (stopped || stalled(a)) -1 else TICK
+                if (stopped) -1 else TICK
             }
+            if (n != -1 && stalled(a)) n = -1
         }
         return n
     }

@@ -141,6 +141,30 @@ class ConnectionTest {
     }
 
     @Test
+    fun `given a server that never reads but keeps sending, then the stalled writer is still detected`() {
+        connection.start()
+        val stalled = accept()
+        await { ConnectionState.Connected in states }
+        val flood = Thread {
+            try {
+                val out = stalled.getOutputStream()
+                while (true) {
+                    out.write("{\"type\":\"didUpdateValue\"}\n".toByteArray())
+                    out.flush()
+                    Thread.sleep(10)
+                }
+            } catch (ignored: java.io.IOException) {
+                return@Thread
+            }
+        }.apply { isDaemon = true; start() }
+        val big = "x".repeat(BIG_LINE)
+        repeat(50) { connection.send(big) }
+        await { ConnectionState.Disconnected in states }
+        flood.join(5000)
+        stalled.close()
+    }
+
+    @Test
     fun `given a stalled writer, then stop returns promptly`() {
         connection.start()
         val stalled = accept()
