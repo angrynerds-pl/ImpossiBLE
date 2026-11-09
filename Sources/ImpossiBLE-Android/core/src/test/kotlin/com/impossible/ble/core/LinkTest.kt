@@ -197,6 +197,30 @@ class LinkTest {
     }
 
     @Test
+    fun `given a discovery failure from an ended connection, then it does not cancel the replacement connection`() {
+        val deferred = java.util.concurrent.ConcurrentLinkedQueue<Runnable>()
+        val g = Fixture { deferred.add(it) }
+        try {
+            val l = Link(g.session, "p", "dev", hooks, retryDelayMs = 10)
+            val types = { g.sent.map { Regex("\"type\":\"(\\w+)\"").find(it)?.groupValues?.get(1) } }
+            l.connect().enqueue()
+            g.drain()
+            g.incoming("""{"type":"didConnect","id":"p","maxWriteWithResponse":512,"maxWriteWithoutResponse":182}""")
+            g.incoming("""{"type":"didDisconnect","id":"p","error":""}""")
+            l.connect().enqueue()
+            g.drain()
+            g.incoming("""{"type":"didConnect","id":"p","maxWriteWithResponse":512,"maxWriteWithoutResponse":182}""")
+            g.awaitThat { types().count { it == "discoverServices" } == 2 }
+            while (deferred.isNotEmpty()) deferred.poll().run()
+            g.drain()
+            assertThat(types()).doesNotContain("cancel")
+            assertThat(l.isConnected).isTrue()
+        } finally {
+            g.close()
+        }
+    }
+
+    @Test
     fun `given a session shutdown, then queued requests fail and the scheduler stops`() {
         val status = java.util.concurrent.atomic.AtomicInteger()
         val queue = f.session.queueFor("x")

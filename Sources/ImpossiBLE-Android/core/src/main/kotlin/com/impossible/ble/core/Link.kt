@@ -165,8 +165,10 @@ class Link<D>(
         discovery.run({ found -> discovered(r, found) }, { status -> initFailed(r, status) })
     }
 
+    private fun initializing(r: Request<D>) = state == LinkState.Initializing && connecting === r && !r.isFinished
+
     private fun discovered(r: Request<D>, found: List<DiscoveredService>) {
-        if (state != LinkState.Initializing) return
+        if (!initializing(r)) return
         services = found
         queue.beginInit()
         session.callbacks.execute {
@@ -190,7 +192,7 @@ class Link<D>(
     }
 
     private fun afterHooks(r: Request<D>, supported: Boolean?) {
-        if (state != LinkState.Initializing) return
+        if (!initializing(r)) return
         when (supported) {
             true -> queue.endInit { ready(r) }
             false -> abandon(r, Reason.DEVICE_NOT_SUPPORTED, ObserverReason.NOT_SUPPORTED, failedToConnect = true)
@@ -199,7 +201,7 @@ class Link<D>(
     }
 
     private fun ready(r: Request<D>) {
-        if (state != LinkState.Initializing) return
+        if (!initializing(r)) return
         enter(LinkState.Ready)
         post {
             hooks.onManagerReady()
@@ -210,7 +212,7 @@ class Link<D>(
     }
 
     private fun initFailed(r: Request<D>, status: Int) {
-        if (state != LinkState.Initializing) return
+        if (!initializing(r)) return
         abandon(r, status, ObserverReason.TERMINATE_LOCAL_HOST, failedToConnect = false)
     }
 

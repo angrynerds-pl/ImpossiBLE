@@ -6,9 +6,8 @@ import java.util.concurrent.ScheduledExecutorService
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 
-class Fixture {
+class Fixture(val callbacks: Executor = Executor { it.run() }) {
     val scheduler: ScheduledExecutorService = Executors.newSingleThreadScheduledExecutor()
-    val callbacks = Executor { it.run() }
     val queue = RequestQueue(scheduler, callbacks)
     val sent = java.util.concurrent.CopyOnWriteArrayList<String>()
     val session = Session(scheduler, callbacks) { line -> sent += line; true }
