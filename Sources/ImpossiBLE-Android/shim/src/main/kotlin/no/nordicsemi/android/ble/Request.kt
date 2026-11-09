@@ -53,7 +53,10 @@ abstract class Request internal constructor(
         invalidCallback = InvalidRequestCallback { status.set(Reason.REQUEST_INVALID); latch.countDown() }
         val core = build()
         core.enqueue()
-        if (!latch.await(core.awaitCeilingMs, TimeUnit.MILLISECONDS)) throw RequestFailedException(this, Reason.TIMEOUT)
+        if (!latch.await(core.awaitLimitMs, TimeUnit.MILLISECONDS)) {
+            core.cancel()
+            throw RequestFailedException(this, Reason.TIMEOUT)
+        }
         when (val s = status.get()) {
             0 -> Unit
             Reason.DEVICE_DISCONNECTED -> throw DeviceDisconnectedException()

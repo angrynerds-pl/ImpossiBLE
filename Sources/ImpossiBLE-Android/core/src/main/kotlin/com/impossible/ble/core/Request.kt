@@ -69,7 +69,9 @@ class Request<D> internal constructor(
         retryDelayMs = delayMs
     }
 
-    val awaitCeilingMs: Long get() = queue.awaitCeilingMs
+    val awaitLimitMs: Long get() = queue.ceilingFor(timeoutMs)
+
+    fun cancel() = queue.cancel(this)
 
     fun clearTimeout() {
         timer?.cancel(false)
@@ -93,8 +95,8 @@ class Request<D> internal constructor(
         failCallback = { _, s -> status.set(s); latch.countDown() }
         invalidCallback = { status.set(Reason.REQUEST_INVALID); latch.countDown() }
         enqueue()
-        if (!latch.await(queue.ceilingFor(timeoutMs), TimeUnit.MILLISECONDS)) {
-            queue.cancel(this)
+        if (!latch.await(awaitLimitMs, TimeUnit.MILLISECONDS)) {
+            cancel()
             throw RequestFailedException(Reason.TIMEOUT)
         }
         when (val s = status.get()) {

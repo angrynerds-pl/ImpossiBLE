@@ -119,6 +119,17 @@ class RequestTest {
     }
 
     @Test
+    fun `given an unbounded queued request that hits the ceiling, then it is cancelled and the next request runs`() {
+        MainThread.isMain = { false }
+        val bounded = RequestQueue(scheduler, Executor { it.run() }, awaitCeilingMs = 100)
+        val stuck = WriteRequest("write") { bounded.request(device, true) { } }
+        stuck.timeoutMillis = 0
+        assertThrows(RequestFailedException::class.java) { stuck.await() }
+        WriteRequest("write") { bounded.request(device, true) { it.succeed() } }.done { events += "next" }.enqueue()
+        waitFor { "next" in events }
+    }
+
+    @Test
     fun `given no operation behind the request, when enqueued, then it names the unsupported method`() {
         val thrown = assertThrows(UnsupportedOperationException::class.java) { WriteRequest("write", null).enqueue() }
         assertThat(thrown).hasMessageThat().isEqualTo("ImpossiBLE shim: write")
