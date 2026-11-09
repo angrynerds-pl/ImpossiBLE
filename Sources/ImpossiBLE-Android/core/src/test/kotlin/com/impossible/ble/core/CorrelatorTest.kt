@@ -75,6 +75,50 @@ class CorrelatorTest {
     }
 
     @Test
+    fun `given a read that timed out, when the next read starts, then the late reply of the first is discarded and the second gets its own`() {
+        val got = mutableListOf<Byte>()
+        correlator.expect(read) { error("timed out request must not complete") }.cancel()
+        correlator.expect(read) { got += (it as DidUpdateValue).value[0] }
+        correlator.dispatch(value(false, 1))
+        assertThat(got).isEmpty()
+        correlator.dispatch(value(false, 2))
+        assertThat(got).containsExactly(2.toByte())
+    }
+
+    @Test
+    fun `given a completed read, then cancelling its token leaves no stale marker`() {
+        val got = mutableListOf<Byte>()
+        val token = correlator.expect(read) { got += 1 }
+        correlator.dispatch(value(false))
+        token.cancel()
+        correlator.expect(read) { got += 2 }
+        correlator.dispatch(value(false))
+        assertThat(got).containsExactly(1.toByte(), 2.toByte()).inOrder()
+    }
+
+    @Test
+    fun `given a timed out read whose reply never comes, then the stale marker expires and does not eat a later reply`() {
+        var now = 0L
+        val c = Correlator(nowNs = { now }, tombstoneTtlMs = 1_000) {}
+        val got = mutableListOf<Byte>()
+        c.expect(read) { }.cancel()
+        now += 2_000_000_000L
+        c.expect(read) { got += 3 }
+        c.dispatch(value(false))
+        assertThat(got).containsExactly(3.toByte())
+    }
+
+    @Test
+    fun `given a timed out read, when the peripheral is lost, then the stale marker is dropped`() {
+        val got = mutableListOf<Byte>()
+        correlator.expect(read) { }.cancel()
+        correlator.lost("p")
+        correlator.expect(read) { got += 4 }
+        correlator.dispatch(value(false))
+        assertThat(got).containsExactly(4.toByte())
+    }
+
+    @Test
     fun `given connect replies, then both success and failure resolve the connect key`() {
         val got = mutableListOf<Incoming>()
         correlator.expect(Key(Kind.Connect, "p")) { got += it }
