@@ -204,14 +204,37 @@ public final class MockServer: ObservableObject {
         Self.terminationRefusal(for: client, relayPid: relayPid.withLock { $0 }) == nil
     }
 
+    /// The pid to signal when the client served right now is still the one that was validated.
+    static func terminationTarget(current: SocketClientInfo?, expectedPid: pid_t, relayPid: pid_t?,
+                                  ownPid: pid_t = getpid()) -> pid_t? {
+        guard let current, current.pid == expectedPid,
+              terminationRefusal(for: current, relayPid: relayPid, ownPid: ownPid) == nil else { return nil }
+        return current.pid
+    }
+
     /// Sends SIGTERM to the connected client; returns the reason when it must not.
+    /// The snapshot checked here is published on main and may be stale, so the
+    /// signal is sent from the I/O queue, only if the client served at that
+    /// moment is still the validated one (a relay takeover in between is refused).
     func terminateConnectedClient() -> String? {
         let client = transport.connectedClient
         if client == nil { return "No simulator app is connected" }
         if let refusal = Self.terminationRefusal(for: client, relayPid: relayPid.withLock { $0 }) {
             return refusal
         }
-        transport.terminateConnectedClient()
+        guard let expectedPid = client?.pid else { return nil }
+        transport.performOnIOQueue { [self] in
+            guard let pid = Self.terminationTarget(current: currentClient, expectedPid: expectedPid,
+                                                   relayPid: relayPid.withLock { $0 }) else {
+                transport.note("Not terminating pid=\(expectedPid): the connected client changed")
+                return
+            }
+            if kill(pid, SIGTERM) == 0 {
+                transport.note("Terminating client pid=\(pid)")
+            } else {
+                transport.note("Failed to terminate client pid=\(pid): errno \(errno)")
+            }
+        }
         return nil
     }
 
@@ -863,8 +886,10 @@ public final class MockServer: ObservableObject {
         if let rule = consumeFailure(.write, deviceID: peripheralUUID, characteristicUUID: String(parts[3])) {
             activityLog.append(kind, deviceID: peripheralUUID, serviceUUID: String(parts[1]),
                                characteristicUUID: String(parts[3]), value: written, detail: rule.summary)
-            if writeType == 0 {
-                sendInjectedATTError(rule, type: "didWriteValue", peripheralUUID: peripheralUUID, idKey: "characteristicId", idValue: charId)
+            if let reply = Self.injectedWriteErrorReply(rule: rule, peripheralUUID: peripheralUUID, charId: charId,
+                                                         writeType: writeType,
+                                                         completesWritesWithoutResponse: completesWritesWithoutResponse) {
+                transport.send(reply)
             }
             return
         }
@@ -1140,7 +1165,12 @@ public final class MockServer: ObservableObject {
     }
 
     private func sendInjectedATTError(_ rule: MockFailureRule, type: String, peripheralUUID: String, idKey: String, idValue: String) {
-        guard case .error(let message, let attError) = rule.behavior else { return }
+        guard let reply = Self.injectedATTErrorReply(rule, type: type, peripheralUUID: peripheralUUID, idKey: idKey, idValue: idValue) else { return }
+        transport.send(reply)
+    }
+
+    static func injectedATTErrorReply(_ rule: MockFailureRule, type: String, peripheralUUID: String, idKey: String, idValue: String) -> [String: Any]? {
+        guard case .error(let message, let attError) = rule.behavior else { return nil }
         var reply: [String: Any] = [
             "type": type,
             "id": peripheralUUID,
@@ -1151,7 +1181,17 @@ public final class MockServer: ObservableObject {
             "errorCode": attError,
         ]
         if type == "didUpdateValue" { reply["isNotification"] = false }
-        transport.send(reply)
+        return reply
+    }
+
+    /// Same gate as `writeCompletionReply`: iOS gets no reply for a write without response.
+    static func injectedWriteErrorReply(rule: MockFailureRule, peripheralUUID: String, charId: String, writeType: Int,
+                                        completesWritesWithoutResponse: Bool) -> [String: Any]? {
+        guard writeType == 0 || completesWritesWithoutResponse else { return nil }
+        guard var reply = injectedATTErrorReply(rule, type: "didWriteValue", peripheralUUID: peripheralUUID,
+                                                idKey: "characteristicId", idValue: charId) else { return nil }
+        if writeType != 0 { reply["writeType"] = writeType }
+        return reply
     }
 
     // MARK: - Utilities

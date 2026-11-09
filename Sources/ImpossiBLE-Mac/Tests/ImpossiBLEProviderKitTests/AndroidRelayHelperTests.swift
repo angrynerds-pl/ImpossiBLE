@@ -72,6 +72,18 @@ final class AndroidRelayHelperTests: XCTestCase {
         XCTAssertTrue(waitForClose(fd, within: 1))
     }
 
+    func testNewlineTerminatedHelloOverTheLimitIsClosed() throws {
+        let fd = try connectToRelay()
+        defer { close(fd) }
+        let hello = #"{"type":"hello","token":"\#(relayToken)","pad":""# + String(repeating: "a", count: 4800) + #""}"#
+        XCTAssertGreaterThan(hello.utf8.count, 4096)
+        send(String(hello.prefix(4096)), to: fd)
+        Thread.sleep(forTimeInterval: 0.3)
+        send(String(hello.dropFirst(4096)) + "\n", to: fd)
+        XCTAssertTrue(waitForClose(fd, within: 2))
+        XCTAssertFalse(provider!.acceptedConnection)
+    }
+
     func testValidHelloIsForwardedWithoutTokenAndWithPidZero() throws {
         let fd = try connectToRelay()
         defer { close(fd) }

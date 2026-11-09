@@ -76,6 +76,7 @@ func readFirstLine(from fd: Int32, limit: Int, deadline: Date) -> (line: Data, r
     var chunk = [UInt8](repeating: 0, count: 1024)
     while true {
         if let newline = buffer.firstIndex(of: UInt8(ascii: "\n")) {
+            if newline - buffer.startIndex > limit { return nil }
             return (buffer.prefix(upTo: newline), buffer.suffix(from: newline + 1))
         }
         if buffer.count > limit { return nil }

@@ -21,6 +21,18 @@ final class WriteCompletionTests: XCTestCase {
         XCTAssertEqual(reply(writeType: 1, relayClient: true)?["writeType"] as? Int, 1)
     }
 
+    func testInjectedWriteErrorIsAnsweredForRelayWithoutResponseOnly() {
+        func errorReply(writeType: Int, relayClient: Bool) -> [String: Any]? {
+            MockServer.injectedWriteErrorReply(
+                rule: MockFailureRule(id: 1, operation: .write, deviceID: "P", characteristicUUID: nil,
+                                       behavior: .error(message: "boom", attError: 3), remaining: nil),
+                peripheralUUID: "P", charId: "P:s:0:c:0", writeType: writeType, completesWritesWithoutResponse: relayClient)
+        }
+        XCTAssertNil(errorReply(writeType: 1, relayClient: false))
+        XCTAssertEqual(errorReply(writeType: 1, relayClient: true)?["errorCode"] as? Int, 3)
+        XCTAssertEqual(errorReply(writeType: 0, relayClient: false)?["errorCode"] as? Int, 3)
+    }
+
     func testOnlyTheRelayProcessIsARelayClient() {
         func client(_ pid: pid_t) -> SocketClientInfo { SocketClientInfo(pid: pid, processName: "c") }
         XCTAssertTrue(MockServer.isRelayClient(client(200), relayPid: 200))

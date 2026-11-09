@@ -30,6 +30,18 @@ final class ClientTerminationTests: XCTestCase {
         XCTAssertNil(refusal(pid: 300, relay: relayPid))
     }
 
+    func testTargetIsOnlyTheClientThatWasValidated() {
+        func target(current: pid_t?, expected: pid_t) -> pid_t? {
+            MockServer.terminationTarget(
+                current: current.map { SocketClientInfo(pid: $0, processName: "c") },
+                expectedPid: expected, relayPid: relayPid, ownPid: ownPid)
+        }
+        XCTAssertEqual(target(current: 300, expected: 300), 300)
+        XCTAssertNil(target(current: relayPid, expected: 300), "A takeover by the relay must not be signalled")
+        XCTAssertNil(target(current: 301, expected: 300), "A different app must not be signalled")
+        XCTAssertNil(target(current: nil, expected: 300), "A disconnected client must not be signalled")
+    }
+
     func testTerminateToolReportsAnErrorWithoutAClient() throws {
         let fixture = ToolsFixture()
         XCTAssertNotNil(fixture.server.terminateConnectedClient())
