@@ -63,7 +63,7 @@ object Wire {
     private const val ADV_CONNECTABLE = "kCBAdvDataIsConnectable"
     private const val ALLOW_DUPLICATES = "kCBScanOptionAllowDuplicates"
 
-    const val CLIENT_VERSION = "0.1.0"
+    const val CLIENT_VERSION = "3.1.0"
 
     fun hello(clientVersion: String, bundleId: String, token: String): String = line {
         put("type", "hello")
