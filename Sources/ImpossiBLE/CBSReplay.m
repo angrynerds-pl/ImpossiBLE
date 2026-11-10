@@ -1,6 +1,7 @@
 #import "include/ImpossiBLE.h"
 #import "CBSConnection.h"
 #import "CBSMock.h"
+#import "CBSReplayInternal.h"
 
 // In-process Replay: plays a wire recording (the JSON Passthrough writes) as if
 // the menu bar app were serving this process in Replay mode. The player is
@@ -13,24 +14,60 @@
 static NSString *const kCBSReplayErrorDomain = @"ImpossiBLE";
 
 NSString *const ImpossiBLEReplayRestartNotification = @"com.impossible.replay.restart";
+NSString *const ImpossiBLEReplayPassedNotification = @"com.impossible.replay.passed";
+NSString *const ImpossiBLEReplayFailedNotification = @"com.impossible.replay.failed";
 
 #if TARGET_OS_SIMULATOR
 
-static const NSTimeInterval kCBSReplayFromClientTimeout = 60;
+const NSTimeInterval kCBSReplayFromClientTimeout = 60;
+
+#pragma mark - Options
+
+static double gSpeed = 1;
+static ImpossiBLEReplayMatching gMatching = ImpossiBLEReplayMatchingStrict;
+static BOOL gPM5CurrentTime = YES;
+
+/// A replay setting: the environment variable `name`, else the launch argument
+/// pair `-name value`. Launch arguments are for tools that start the app with
+/// arguments but cannot set its environment (e2e frameworks driving an
+/// unmodified app); `simctl launch` and XCUIApplication can do either.
+static NSString *CBSReplaySetting(NSString *name)
+{
+    NSProcessInfo *process = NSProcessInfo.processInfo;
+    NSString *value = process.environment[name];
+    if (value.length > 0) return value;
+    NSArray<NSString *> *arguments = process.arguments;
+    NSUInteger flag = [arguments indexOfObject:[@"-" stringByAppendingString:name]];
+    if (flag != NSNotFound && flag + 1 < arguments.count) return arguments[flag + 1];
+    return nil;
+}
+
+/// Request → response characteristic UUID prefixes for relaxed replay.
+static NSDictionary<NSString *, NSString *> *CBSReplayChannels(void)
+{
+    NSString *configured = CBSReplaySetting(@"IMPOSSIBLE_REPLAY_CHANNELS");
+    if (configured.length == 0) {
+        // Concept2 PM5: CSAFE commands are written to CE060021 and answered
+        // with notifications on CE060022.
+        return @{@"CE060021": @"CE060022"};
+    }
+    NSMutableDictionary *channels = [NSMutableDictionary dictionary];
+    for (NSString *pair in [configured componentsSeparatedByString:@","]) {
+        NSArray<NSString *> *sides = [pair componentsSeparatedByString:@":"];
+        NSString *request = [sides.firstObject stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        NSString *response = [sides.lastObject stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceCharacterSet];
+        if (sides.count == 2 && request.length > 0 && response.length > 0) {
+            channels[request.uppercaseString] = response.uppercaseString;
+        }
+    }
+    return channels;
+}
 
 #pragma mark - Script
 
-@interface CBSReplayEntry : NSObject
-@property (nonatomic) NSInteger seq;
-@property (nonatomic, strong) NSDate *timestamp;
-@property (nonatomic) BOOL fromClient;
-@property (nonatomic, copy) NSDictionary *message;
-@property (nonatomic, copy) NSString *type;
-@end
-
 @implementation CBSReplayEntry
 
-static NSDictionary *CBSReplayRelevantKeys(NSDictionary *message)
+NSDictionary *CBSReplayRelevantKeys(NSDictionary *message)
 {
     NSMutableDictionary *relevant = [NSMutableDictionary dictionaryWithCapacity:message.count];
     [message enumerateKeysAndObjectsUsingBlock:^(id key, id value, BOOL *stop) {
@@ -133,14 +170,74 @@ static NSArray<CBSReplayEntry *> *CBSReplayLoadScript(NSString *path, NSError **
     [entries sortUsingComparator:^NSComparisonResult(CBSReplayEntry *a, CBSReplayEntry *b) {
         return a.seq < b.seq ? NSOrderedAscending : (a.seq > b.seq ? NSOrderedDescending : NSOrderedSame);
     }];
+    if ([entries indexOfObjectPassingTest:^BOOL(CBSReplayEntry *entry, NSUInteger idx, BOOL *stop) { return !entry.fromClient; }] == NSNotFound) {
+        CBSReplayFail(error, 11, @"Nothing in it goes to the app — this looks like a file Replay mode recorded. Load a Passthrough recording (made against a real device) instead.");
+        return nil;
+    }
     return entries;
 }
 
 #pragma mark - Player
 
 static ImpossiBLEReplayStatusHandler gStatusHandler;
+/// `IMPOSSIBLE_REPLAY_DEBUG`: log every message between the app and the
+/// replay, one line each, to see which request a stuck replay never answered.
+static void CBSReplayTrace(NSString *arrow, NSDictionary *message)
+{
+    static BOOL enabled;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{ enabled = CBSReplaySetting(@"IMPOSSIBLE_REPLAY_DEBUG").length > 0; });
+    if (!enabled) return;
+    NSMutableString *line = [NSMutableString stringWithString:[message[@"type"] description] ?: @"?"];
+    NSString *characteristic = message[@"characteristicId"];
+    if ([characteristic isKindOfClass:NSString.class]) {
+        NSArray<NSString *> *parts = [characteristic componentsSeparatedByString:@":"];
+        if (parts.count >= 2) [line appendFormat:@" %@", [parts[parts.count - 2] substringToIndex:MIN((NSUInteger)8, parts[parts.count - 2].length)]];
+    }
+    NSString *value = message[@"value"] ?: message[@"valueB64"];
+    NSData *data = [value isKindOfClass:NSString.class] ? [[NSData alloc] initWithBase64EncodedString:value options:0] : nil;
+    if (data.length > 0) {
+        NSMutableString *hex = [NSMutableString string];
+        const uint8_t *bytes = data.bytes;
+        for (NSUInteger i = 0; i < MIN(data.length, (NSUInteger)24); i++) [hex appendFormat:@"%02X", bytes[i]];
+        [line appendFormat:@" %@%@", hex, data.length > 24 ? @"…" : @""];
+    }
+    if ([message[@"error"] isKindOfClass:NSString.class] && [message[@"error"] length] > 0) [line appendFormat:@" error=%@", message[@"error"]];
+    NSLog(@"ImpossiBLE: replay %@ %@", arrow, line);
+}
 
-static void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
+static void CBSReplayDeliver(NSDictionary *message)
+{
+    CBSReplayTrace(@"→ app", message);
+    CBSConnectionDeliverLocal(message);
+}
+
+/// `IMPOSSIBLE_REPLAY_STATUS_FILE`: where a replay started from the environment
+/// writes its outcome, since a Darwin notification carries no reason.
+static NSString *gStatusFilePath;
+
+static void CBSReplayWriteStatusFile(NSString *state, NSString *detail)
+{
+    NSString *path = gStatusFilePath;
+    if (path.length == 0) return;
+    NSISO8601DateFormatter *formatter = [NSISO8601DateFormatter new];
+    formatter.formatOptions |= NSISO8601DateFormatWithFractionalSeconds;
+    NSDictionary *status = @{@"state": state, @"detail": detail ?: @"", @"timestamp": [formatter stringFromDate:[NSDate date]]};
+    NSData *data = [NSJSONSerialization dataWithJSONObject:status options:NSJSONWritingPrettyPrinted error:nil];
+    if (![data writeToFile:path options:NSDataWritingAtomic error:nil]) {
+        NSLog(@"ImpossiBLE: could not write the replay status to %@", path);
+    }
+}
+
+/// A run has no outcome yet: a test that reads the file instead of waiting
+/// for the notification must not see the previous run's passed/failed.
+static void CBSReplayClearStatusFile(void)
+{
+    if (gStatusFilePath.length == 0) return;
+    [NSFileManager.defaultManager removeItemAtPath:gStatusFilePath error:nil];
+}
+
+void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
 {
     switch (state) {
         case ImpossiBLEReplayStatePassed:
@@ -152,6 +249,16 @@ static void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
             break;
         default:
             break;
+    }
+    // A UI test runs in another process; Darwin notifications are what it
+    // can observe, and the status file, written first, tells it why.
+    if (state == ImpossiBLEReplayStatePassed || state == ImpossiBLEReplayStateFailed) {
+        CBSReplayWriteStatusFile(state == ImpossiBLEReplayStatePassed ? @"passed" : @"failed", detail);
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             (__bridge CFStringRef)(state == ImpossiBLEReplayStatePassed
+                                                                    ? ImpossiBLEReplayPassedNotification
+                                                                    : ImpossiBLEReplayFailedNotification),
+                                             NULL, NULL, true);
     }
     dispatch_async(dispatch_get_main_queue(), ^{
         ImpossiBLEReplayStatusHandler handler = gStatusHandler;
@@ -173,15 +280,14 @@ static void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
 ///
 /// All state is confined to `_queue`; scheduled callbacks check `_generation`,
 /// so nothing from a previous run fires into the next.
-@interface CBSReplayPlayer : NSObject
-- (instancetype)initWithEntries:(NSArray<CBSReplayEntry *> *)entries;
-- (void)start;
-- (void)stop;
-- (void)handle:(NSDictionary *)message;
+@interface CBSReplayPlayer : NSObject <CBSReplayPlaying>
+- (instancetype)initWithEntries:(NSArray<CBSReplayEntry *> *)entries speed:(double)speed;
 @end
 
 @implementation CBSReplayPlayer {
+    void (^_willStartRun)(void);
     NSArray<CBSReplayEntry *> *_entries;
+    double _speed;
     dispatch_queue_t _queue;
     NSUInteger _generation;
     NSUInteger _index;
@@ -194,11 +300,12 @@ static void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
     dispatch_source_t _timer;
 }
 
-- (instancetype)initWithEntries:(NSArray<CBSReplayEntry *> *)entries
+- (instancetype)initWithEntries:(NSArray<CBSReplayEntry *> *)entries speed:(double)speed
 {
     self = [super init];
     if (self) {
         _entries = [entries copy];
+        _speed = speed > 0 ? speed : 1;
         _queue = dispatch_queue_create("impossible.replay.player", DISPATCH_QUEUE_SERIAL);
         _pending = [NSMutableArray array];
         _delayedIndex = -1;
@@ -207,9 +314,12 @@ static void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
     return self;
 }
 
+@synthesize willStartRun = _willStartRun;
+
 - (void)start
 {
     dispatch_async(_queue, ^{
+        if (self->_willStartRun) self->_willStartRun();
         // The first start keeps what the app sent since setup; a restart
         // begins from a clean slate.
         if (self->_running || !self->_accepting) {
@@ -263,7 +373,7 @@ static void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
 
         if (_delayedIndex != (NSInteger)_index) {
             _delayedIndex = (NSInteger)_index;
-            NSTimeInterval delay = _index == 0 ? 0 : MAX(0, [entry.timestamp timeIntervalSinceDate:_entries[_index - 1].timestamp]);
+            NSTimeInterval delay = _index == 0 ? 0 : MAX(0, [entry.timestamp timeIntervalSinceDate:_entries[_index - 1].timestamp]) / _speed;
             if (delay > 0) {
                 [self reportProgress];
                 __weak typeof(self) weakSelf = self;
@@ -273,7 +383,7 @@ static void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
         }
 
         if (!entry.fromClient) {
-            CBSConnectionDeliverLocal(entry.message);
+            CBSReplayDeliver(entry.message);
             _index++;
         } else if ([self takePendingMatching:entry]) {
             _index++;
@@ -364,7 +474,7 @@ static void CBSReplayReportStatus(ImpossiBLEReplayState state, NSString *detail)
 
 #pragma mark - Public API
 
-static CBSReplayPlayer *gPlayer;
+static id<CBSReplayPlaying> gPlayer;
 
 static id CBSReplayLock(void)
 {
@@ -374,7 +484,7 @@ static id CBSReplayLock(void)
     return lock;
 }
 
-static CBSReplayPlayer *CBSReplayCurrentPlayer(void)
+static id<CBSReplayPlaying> CBSReplayCurrentPlayer(void)
 {
     @synchronized (CBSReplayLock()) {
         return gPlayer;
@@ -392,8 +502,40 @@ BOOL ImpossiBLESetupReplay(NSString *path, NSError **error)
         return NO;
     }
 
-    CBSReplayPlayer *player = [[CBSReplayPlayer alloc] initWithEntries:entries];
-    CBSReplayPlayer *previous;
+    double speed;
+    ImpossiBLEReplayMatching matching;
+    BOOL pm5CurrentTime;
+    @synchronized (CBSReplayLock()) {
+        speed = gSpeed;
+        matching = gMatching;
+        pm5CurrentTime = gPM5CurrentTime;
+    }
+    NSDictionary<NSString *, NSString *> *channels = CBSReplayChannels();
+    id<CBSReplayPlaying> player;
+    if (matching == ImpossiBLEReplayMatchingRelaxed) {
+        player = [[CBSReplayRelaxedPlayer alloc] initWithEntries:entries
+                                                           speed:speed
+                                                        channels:channels
+                                                         deliver:^(NSDictionary *message) { CBSReplayDeliver(message); }];
+    } else {
+        player = [[CBSReplayPlayer alloc] initWithEntries:entries speed:speed];
+    }
+    if (pm5CurrentTime) {
+        // Every run — the first start and each restart — moves the clock to
+        // its own start time from the recorded values, so a restarted run is
+        // not logged as a duplicate of the previous one. Only toClient values
+        // change, which neither player matches on; the players share these
+        // entry objects and call this on their queue.
+        NSArray<NSDictionary *> *recorded = [entries valueForKey:@"message"];
+        NSSet<NSString *> *responseChannels = [NSSet setWithArray:channels.allValues];
+        player.willStartRun = ^{
+            [entries enumerateObjectsUsingBlock:^(CBSReplayEntry *entry, NSUInteger index, BOOL *stop) {
+                entry.message = recorded[index];
+            }];
+            CBSReplayShiftPM5Times(entries, [NSDate date], responseChannels);
+        };
+    }
+    id<CBSReplayPlaying> previous;
     BOOL attached;
     @synchronized (CBSReplayLock()) {
         previous = gPlayer;
@@ -406,20 +548,37 @@ BOOL ImpossiBLESetupReplay(NSString *path, NSError **error)
         // Every outgoing message goes to whichever player is current, so a
         // second setup just swaps players without bouncing the connection.
         CBSConnectionSetLocalProvider(^(NSDictionary *message) {
+            CBSReplayTrace(@"app →", message);
             [CBSReplayCurrentPlayer() handle:message];
         });
         // Install the activator's handlers now: setup may run before the app
         // creates its CBCentralManager, and replayed messages need a receiver.
         CBSEnsureConnectionOpen();
     }
-    NSLog(@"ImpossiBLE: replay set up with %lu entries from %@", (unsigned long)entries.count, path);
+    NSLog(@"ImpossiBLE: replay set up with %lu entries from %@ (%@, speed %g)", (unsigned long)entries.count, path,
+          matching == ImpossiBLEReplayMatchingRelaxed ? @"relaxed" : @"strict", speed);
     CBSReplayReportStatus(ImpossiBLEReplayStateReady, nil);
     return YES;
 }
 
+void ImpossiBLESetReplayOptions(double speed, ImpossiBLEReplayMatching matching)
+{
+    @synchronized (CBSReplayLock()) {
+        gSpeed = speed > 0 ? speed : 1;
+        gMatching = matching;
+    }
+}
+
+void ImpossiBLESetReplayPM5CurrentTime(BOOL enabled)
+{
+    @synchronized (CBSReplayLock()) {
+        gPM5CurrentTime = enabled;
+    }
+}
+
 BOOL ImpossiBLEStartReplay(NSError **error)
 {
-    CBSReplayPlayer *player = CBSReplayCurrentPlayer();
+    id<CBSReplayPlaying> player = CBSReplayCurrentPlayer();
     if (!player) {
         return CBSReplayFail(error, 13, @"No replay is set up; call ImpossiBLESetupReplay first");
     }
@@ -429,7 +588,7 @@ BOOL ImpossiBLEStartReplay(NSError **error)
 
 BOOL ImpossiBLEStopReplay(NSError **error)
 {
-    CBSReplayPlayer *player = CBSReplayCurrentPlayer();
+    id<CBSReplayPlaying> player = CBSReplayCurrentPlayer();
     if (!player) {
         return CBSReplayFail(error, 13, @"No replay is set up; call ImpossiBLESetupReplay first");
     }
@@ -439,7 +598,7 @@ BOOL ImpossiBLEStopReplay(NSError **error)
 
 BOOL ImpossiBLECleanupReplay(NSError **error)
 {
-    CBSReplayPlayer *player;
+    id<CBSReplayPlaying> player;
     @synchronized (CBSReplayLock()) {
         player = gPlayer;
         gPlayer = nil;
@@ -464,6 +623,7 @@ static void CBSReplayRestart(CFNotificationCenterRef center, void *observer, CFN
                              const void *object, CFDictionaryRef userInfo)
 {
     NSError *error = nil;
+    CBSReplayClearStatusFile();
     if (!ImpossiBLEStartReplay(&error)) {
         NSLog(@"ImpossiBLE: replay restart failed: %@", error.localizedDescription);
         return;
@@ -473,12 +633,26 @@ static void CBSReplayRestart(CFNotificationCenterRef center, void *observer, CFN
 
 void CBSReplayStartFromEnvironment(void)
 {
-    NSString *path = NSProcessInfo.processInfo.environment[@"IMPOSSIBLE_REPLAY_RECORDING"];
+    NSString *path = CBSReplaySetting(@"IMPOSSIBLE_REPLAY_RECORDING");
     if (path.length == 0) return;
+    gStatusFilePath = [CBSReplaySetting(@"IMPOSSIBLE_REPLAY_STATUS_FILE") copy];
+    CBSReplayClearStatusFile();
+
+    double speed = CBSReplaySetting(@"IMPOSSIBLE_REPLAY_SPEED").doubleValue;
+    NSString *mode = CBSReplaySetting(@"IMPOSSIBLE_REPLAY_MODE").lowercaseString;
+    if (mode.length > 0 && ![mode isEqualToString:@"strict"] && ![mode isEqualToString:@"relaxed"]) {
+        NSLog(@"ImpossiBLE: ignoring IMPOSSIBLE_REPLAY_MODE=%@ (strict or relaxed)", mode);
+    }
+    ImpossiBLESetReplayOptions(speed > 0 ? speed : 1,
+                               [mode isEqualToString:@"relaxed"] ? ImpossiBLEReplayMatchingRelaxed : ImpossiBLEReplayMatchingStrict);
+    ImpossiBLESetReplayPM5CurrentTime(![CBSReplaySetting(@"IMPOSSIBLE_REPLAY_PM5_TIME").lowercaseString isEqualToString:@"recorded"]);
 
     NSError *error = nil;
     if (!ImpossiBLESetupReplay(path, &error) || !ImpossiBLEStartReplay(&error)) {
         NSLog(@"ImpossiBLE: replay from IMPOSSIBLE_REPLAY_RECORDING failed: %@", error.localizedDescription);
+        CBSReplayWriteStatusFile(@"failed", [@"setup failed: " stringByAppendingString:error.localizedDescription ?: @"unknown error"]);
+        CFNotificationCenterPostNotification(CFNotificationCenterGetDarwinNotifyCenter(),
+                                             (__bridge CFStringRef)ImpossiBLEReplayFailedNotification, NULL, NULL, true);
         return;
     }
     // A UI test runs in another process and cannot call into this one; a Darwin
@@ -507,6 +681,8 @@ BOOL ImpossiBLESetupReplay(NSString *path, NSError **error) { return CBSReplayUn
 BOOL ImpossiBLEStartReplay(NSError **error) { return CBSReplayUnavailable(error); }
 BOOL ImpossiBLEStopReplay(NSError **error) { return CBSReplayUnavailable(error); }
 BOOL ImpossiBLECleanupReplay(NSError **error) { return CBSReplayUnavailable(error); }
+void ImpossiBLESetReplayOptions(double speed, ImpossiBLEReplayMatching matching) {}
+void ImpossiBLESetReplayPM5CurrentTime(BOOL enabled) {}
 void ImpossiBLESetReplayStatusHandler(ImpossiBLEReplayStatusHandler handler) {}
 
 #endif

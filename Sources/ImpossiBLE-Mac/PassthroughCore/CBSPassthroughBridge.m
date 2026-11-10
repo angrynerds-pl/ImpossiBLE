@@ -94,8 +94,13 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
 }
 
 - (void)startRecordingToDirectory:(NSString *)directory {
+    [self startRecordingToDirectory:directory filePrefix:@"passthrough"];
+}
+
+- (void)startRecordingToDirectory:(NSString *)directory filePrefix:(NSString *)filePrefix {
     [self.recorder finish];
-    CBSWireRecorder *recorder = [[CBSWireRecorder alloc] initWithDirectory:directory filePrefix:@"passthrough"];
+    CBSWireRecorder *recorder = [[CBSWireRecorder alloc] initWithDirectory:directory
+                                                                filePrefix:filePrefix.length > 0 ? filePrefix : @"passthrough"];
     recorder.fileOpenedHandler = self.recordingFileHandler;
     self.recorder = recorder;
 }
@@ -107,6 +112,10 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
 
 - (BOOL)isRecording {
     return self.recorder != nil;
+}
+
+- (void)recordMessage:(NSDictionary<NSString *, id> *)message direction:(NSString *)direction {
+    [self.recorder recordMessage:message direction:direction];
 }
 
 - (NSDictionary *)scanOptionsFromWire:(NSDictionary *)wireOptions {
@@ -298,7 +307,6 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
         return;
     }
     CBSDebugLog(@"recv type=%@", type);
-    [self.recorder recordMessage:msg direction:CBSWireDirectionFromClient];
 
     if ([type isEqualToString:@"registerForConnectionEvents"]) {
         // registerForConnectionEventsWithOptions: is not available in the macOS
@@ -735,7 +743,6 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
     if (!handler) {
         return;
     }
-    [self.recorder recordMessage:msg direction:CBSWireDirectionToClient];
     dispatch_async(self.outQueue, ^{
         handler(msg);
     });

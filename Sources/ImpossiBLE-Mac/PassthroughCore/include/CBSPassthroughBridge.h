@@ -27,11 +27,22 @@ NS_ASSUME_NONNULL_BEGIN
 /// Whether wire traffic is being recorded. Off until started.
 @property (nonatomic, readonly, getter=isRecording) BOOL recording;
 
-/// Records every protocol message in both directions as JSON (see
-/// `CBSWireRecorder`), one `passthrough-<date>-<pid>-<ptr>.json` file per
-/// client session, the first one opening with the next message. Starting
-/// again closes the current file.
+/// Opens a recording: one `passthrough-<date>-<pid>-<ptr>.json` file (see
+/// `CBSWireRecorder`) per client session, the first one opening with the next
+/// recorded message. Starting again closes the current file.
+///
+/// The bridge does not record on its own: the host calls `recordMessage:` with
+/// what the app actually sent and received. Traffic the host injects or
+/// consumes itself (the PM5 remote) must not reach the recording, and only
+/// the host can tell it apart.
 - (void)startRecordingToDirectory:(NSString *)directory;
+
+/// As `startRecordingToDirectory:`, with `<filePrefix>-…` file names.
+- (void)startRecordingToDirectory:(NSString *)directory filePrefix:(NSString *)filePrefix;
+
+/// Appends one message to the current recording; a no-op while not recording.
+/// `direction` is `CBSWireDirectionFromClient` or `CBSWireDirectionToClient`.
+- (void)recordMessage:(NSDictionary<NSString *, id> *)message direction:(NSString *)direction;
 
 /// Closes the current recording file and records nothing further.
 - (void)stopRecording;

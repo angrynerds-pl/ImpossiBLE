@@ -660,7 +660,7 @@ public struct ImpossiBLESection: View {
         VStack(spacing: 12) {
             ReplayScriptDropZone(
                 script: server.replayScript,
-                canRestart: transport.status == .clientConnected,
+                canRestart: transport.status == .clientConnected && server.replayStarted,
                 onLoad: { server.loadReplayScript(from: $0) },
                 onRestart: { server.restartReplay() },
                 onClear: { server.clearReplayScript() }
@@ -669,6 +669,14 @@ public struct ImpossiBLESection: View {
             .padding(.top, 12)
 
             if server.replayScript?.isValid == true {
+                ReplayOptionsRow(
+                    options: server.replayOptions,
+                    isStarted: server.replayStarted,
+                    onChange: { server.setReplayOptions($0) },
+                    onStart: { server.startReplay() },
+                    onStop: { server.stopReplay() }
+                )
+                .padding(.horizontal, 12)
                 ReplayRunStatusRow(status: server.replayRun)
                     .padding(.horizontal, 12)
                 Spacer(minLength: 0)

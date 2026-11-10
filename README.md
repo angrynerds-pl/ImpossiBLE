@@ -145,6 +145,35 @@ defaults write com.impossible.ble-mac SelectedProviderMode passthrough   # or: m
 make mac-run
 ```
 
+### Recording and Replaying
+
+Passthrough can record a session with a real device — the panel's **Record** button, or `passthrough_record_start` / `passthrough_record_stop` over MCP — and a UI test can replay that recording in the app's own process, with no Mac app running:
+
+```swift
+let app = XCUIApplication()
+app.launchEnvironment["IMPOSSIBLE_REPLAY_RECORDING"] = Bundle(for: Self.self).path(forResource: "pm5-just-row", ofType: "json")!
+app.launchEnvironment["IMPOSSIBLE_REPLAY_MODE"] = "relaxed"   // default: strict
+app.launchEnvironment["IMPOSSIBLE_REPLAY_SPEED"] = "10"       // default: 1 (recorded timing)
+app.launch()
+```
+
+Every `IMPOSSIBLE_REPLAY_*` setting can also be passed as a launch argument pair, `-IMPOSSIBLE_REPLAY_RECORDING /path/to/recording.json`, for tools that start the app with arguments but cannot set its environment (e2e frameworks driving an unmodified app). The environment variable wins when both are set.
+
+A recording only contains what the app itself sent and received; commands sent through the PM5 remote are left out.
+
+**Strict** replay waits for every recorded app message, in order. Use it for apps whose traffic is the same on every run. **Relaxed** replay is for apps like a rowing app that polls on timers, subscribes in varying order, or writes the current date:
+- every app request is answered with the replies recorded for the most similar request;
+- notifications follow the recorded timeline, which only waits for the first request of each kind;
+- PM5 CSAFE commands are matched by command structure, ignoring their data. Other request/response characteristic pairs can be named with `IMPOSSIBLE_REPLAY_CHANNELS=<req-uuid-prefix>:<resp-uuid-prefix>`.
+
+The result is logged (`ImpossiBLE: replay passed` / `FAILED — …`). It is also posted as the Darwin notifications `com.impossible.replay.passed` / `com.impossible.replay.failed`, which the test runner can wait for; with `IMPOSSIBLE_REPLAY_STATUS_FILE` set to a path, the outcome and its reason are written there as JSON first (`{"state": "failed", "detail": "…"}`), including a recording that could not be loaded. Set `IMPOSSIBLE_REPLAY_DEBUG=1` to log every message between the app and the replay (`ImpossiBLE: replay app → read CE060011`, `→ app didUpdateValue …`) when a replay gets stuck. Posting `com.impossible.replay.restart` restarts the recording from the top.
+
+When replaying a Concept2 PM5, ImpossiBLE moves the PM5's clock to the time of the replay: workout summaries and the CSAFE date/time and logged-workout replies get the current date and time, and everything else stays byte for byte. That makes a replayed workout a new one, so the Concept2 Logbook does not reject it as a duplicate of the recorded one. Set `IMPOSSIBLE_REPLAY_PM5_TIME=recorded` to keep the recorded times.
+
+For manual checks against a simulator, the Mac app's **Replay** mode offers the same: drop a recording on the panel, pick Strict or Relaxed (the panel explains each; Relaxed is the default), a speed, and whether to move the PM5 clock to now, then press **Start** — loading a file does not start it. While started, each run (every app connection, or the restart button) starts from the top; **Stop** returns to ready.
+
+The same options are available in code with `ImpossiBLESetReplayOptions(speed, .relaxed)`, called before `ImpossiBLESetupReplay`.
+
 ### Capturing Mock Configurations
 
 <p align="center">
@@ -306,6 +335,13 @@ Working-set edits are saved immediately but only change a stored configuration t
 | Tool | Arguments | What it does |
 |---|---|---|
 | `passthrough_activity` | — | The real devices the app talks to and its latest GATT/L2CAP operation on each. |
+| `passthrough_record_start` | `label`? | Records what the app sends and receives, as a replayable JSON file in `/tmp/impossible-passthrough-recordings` named `<label>-<date>-…json`. PM5 remote traffic is left out. See [Recording and Replaying](#recording-and-replaying). |
+| `passthrough_record_stop` | — | Stops recording; returns the file and its entry count. |
+| `passthrough_recordings_list` | — | Recordings on disk, newest first, with size and entry count. |
+| `replay_load` | `path` | Loads and validates a recording for Replay mode, as dropping it on the panel does. It does not play until `replay_start`. |
+| `replay_set_options` | `matching`?, `speed`?, `pm5CurrentTime`? | Relaxed or strict, the speed, and whether a PM5's clock moves to now. Persisted. |
+| `replay_start` / `replay_stop` | — | Starts playing the loaded recording to the app (needs replay mode, see `set_mode`), or stops answering it. |
+| `replay_status` | — | The loaded recording, options, and the run: ready, running (step, awaited request), passed, or failed with the reason. |
 | `terminate_simulator_app` | — | Sends SIGTERM to the connected simulator app, e.g. to restart it with a clean Bluetooth state. |
 
 **PM5 remote** (passthrough, with the app connected to a Concept2 PM5 — see [PM5 Remote](#pm5-remote))

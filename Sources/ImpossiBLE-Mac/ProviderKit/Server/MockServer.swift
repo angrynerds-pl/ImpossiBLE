@@ -77,6 +77,10 @@ public final class MockServer: ObservableObject {
     @Published private(set) var replayRecording = ReplayRecordingState()
     @Published private(set) var replayScript: ReplayScriptState?
     @Published private(set) var replayRun: ReplayRunStatus = .idle
+    @Published private(set) var replayOptions = ReplayOptions.load()
+    /// Whether the loaded recording is being played. Loading a recording
+    /// leaves it stopped, so options can be set before `startReplay()`.
+    @Published private(set) var replayStarted = false
     /// Main thread only. Identifies the responder whose status `replayRun`
     /// shows, so a replaced responder's late updates are ignored.
     private var replayRunID = 0
@@ -119,12 +123,19 @@ public final class MockServer: ObservableObject {
     private var passthroughBridge: CBSPassthroughBridge?
     /// Applied to the bridge when it is created, and whenever it changes.
     private var passthroughRecordingEnabled = false
+    private var passthroughRecordingPrefix = MockServer.recordingPrefix(for: nil)
     /// Created on first Replay start and kept for the process lifetime.
     private var replayEngine: ReplayEngine?
     /// The validated script, applied to the engine whenever it exists.
     private var activeReplayScript: ReplayScript?
-    /// The scripted responder currently installed, for restarts.
-    private var scriptedReplayResponder: ScriptedReplayResponder?
+    /// The responder currently installed for the loaded script, for restarts.
+    private var scriptedReplayResponder: ReplayRunResponder?
+    /// Guarded by the I/O queue; mirrors `replayOptions`.
+    private var activeReplayOptions = ReplayOptions.load()
+    /// Mirrors `replayStarted`. I/O queue.
+    private var replayStartedIO = false
+    /// The connected app's current scan request in Replay mode. I/O queue.
+    private var replayClientScan: [String: Any]?
     private var nextReplayRunID = 0
 
     private static let serverEnabledKey = "ServerEnabled"
@@ -259,6 +270,7 @@ public final class MockServer: ObservableObject {
     /// Everything the previous client owned, in both modes. Runs on connect,
     /// disconnect, takeover, and stop alike.
     private func tearDownClientState() {
+        replayClientScan = nil
         connectedPeripherals.removeAll()
         pairedPeripherals.removeAll()
         writtenCharValues.removeAll()
@@ -284,7 +296,7 @@ public final class MockServer: ObservableObject {
             self.transport.performOnIOQueue {
                 guard self.serveMode == .passthrough else { return }
                 if self.pm5Engine.bridgeMessage(message) { return }
-                self.transport.send(message)
+                self.forwardToApp(message)
             }
         }
         bridge.activityHandler = { [weak self] peripheralId, name, operation, detail in
@@ -300,29 +312,54 @@ public final class MockServer: ObservableObject {
             }
         }
         if passthroughRecordingEnabled {
-            bridge.startRecording(toDirectory: PassthroughRecordingState.directory)
+            bridge.startRecording(toDirectory: PassthroughRecordingState.directory, filePrefix: passthroughRecordingPrefix)
         }
         bridge.reportsWriteWithoutResponseCompletion = completesWritesWithoutResponse
         passthroughBridge = bridge
     }
 
+    /// Sends a bridge reply to the app and records it. Everything the app sees
+    /// in Passthrough goes through here — including replies the PM5 engine held
+    /// back and released later — and nothing the engine consumed does, so the
+    /// recording is exactly the app's view. I/O queue only.
+    private func forwardToApp(_ message: [String: Any]) {
+        passthroughBridge?.recordMessage(message, direction: CBSWireDirectionToClient)
+        transport.send(message)
+    }
+
     /// Starts or stops recording Passthrough traffic. A recording started
     /// mid-session opens its file with the next message; each later client
     /// session gets its own file. Not persisted: every launch starts off.
-    func setPassthroughRecording(_ enabled: Bool) {
+    ///
+    /// - Parameter label: file name prefix (sanitised; `passthrough` when nil
+    ///   or empty). Starting while already recording with a different label
+    ///   closes the current file and starts a new one.
+    func setPassthroughRecording(_ enabled: Bool, label: String? = nil) {
+        let prefix = Self.recordingPrefix(for: label)
         passthroughRecording.isRecording = enabled
-        if enabled {
-            passthroughRecording.path = nil
-        }
         transport.performOnIOQueue { [self] in
-            guard passthroughRecordingEnabled != enabled else { return }
+            guard passthroughRecordingEnabled != enabled || (enabled && prefix != passthroughRecordingPrefix) else { return }
             passthroughRecordingEnabled = enabled
             if enabled {
-                passthroughBridge?.startRecording(toDirectory: PassthroughRecordingState.directory)
+                // Only a new recording drops the shown file; a repeated start
+                // keeps writing the open one, whose path will not be reported
+                // again. Enqueued before the recorder can open a new file.
+                DispatchQueue.main.async { self.passthroughRecording.path = nil }
+                passthroughRecordingPrefix = prefix
+                passthroughBridge?.startRecording(toDirectory: PassthroughRecordingState.directory, filePrefix: prefix)
             } else {
                 passthroughBridge?.stopRecording()
             }
         }
+    }
+
+    /// A file-name-safe recording prefix: letters, digits, `-` and `_` only,
+    /// at most 64 characters.
+    static func recordingPrefix(for label: String?) -> String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_")
+        let cleaned = String((label ?? "").map { allowed.contains($0) ? $0 : "-" }.prefix(64))
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return cleaned.isEmpty ? "passthrough" : cleaned
     }
 
     private func prepareReplayEngine() {
@@ -351,11 +388,12 @@ public final class MockServer: ObservableObject {
 
     // MARK: - Replay script
 
-    /// Loads and validates a recording for Replay mode. A valid script takes
-    /// effect immediately: a connected client's run restarts from the first
-    /// entry. An invalid one is shown as such and Replay falls back to
-    /// recording only.
+    /// Loads and validates a recording for Replay mode. It is not played
+    /// until `startReplay()`, so matching and speed can be set first; an
+    /// invalid one is shown as such. Either way Replay stops and only records
+    /// the app until started.
     func loadReplayScript(from url: URL) {
+        replayStarted = false
         let script: ReplayScript?
         do {
             let loaded = try ReplayScript.load(from: url)
@@ -373,6 +411,7 @@ public final class MockServer: ObservableObject {
     }
 
     func clearReplayScript() {
+        replayStarted = false
         replayScript = nil
         applyReplayScript(nil)
     }
@@ -380,7 +419,18 @@ public final class MockServer: ObservableObject {
     private func applyReplayScript(_ script: ReplayScript?) {
         transport.performOnIOQueue { [self] in
             activeReplayScript = script
-            replayEngine?.replaceResponder(makeReplayResponder())
+            replayStartedIO = false
+            replaceReplayResponder()
+        }
+    }
+
+    /// Installs a responder for the current script and options. A connected
+    /// app that is already scanning will not scan again, so the new run is
+    /// told about its scan. I/O queue only.
+    private func replaceReplayResponder() {
+        replayEngine?.replaceResponder(makeReplayResponder())
+        if let scan = replayClientScan {
+            scriptedReplayResponder?.handle(scan)
         }
     }
 
@@ -390,29 +440,83 @@ public final class MockServer: ObservableObject {
         let runID = nextReplayRunID
         // Enqueued before the responder exists, so the ID switch reaches main
         // ahead of any status the new responder publishes.
+        let ready = activeReplayScript != nil && !replayStartedIO
         DispatchQueue.main.async { [weak self] in
             self?.replayRunID = runID
-            self?.replayRun = .idle
+            self?.replayRun = ready ? .ready : .idle
         }
-        guard let script = activeReplayScript else {
+        guard let script = activeReplayScript, replayStartedIO else {
             scriptedReplayResponder = nil
             return SilentReplayResponder()
         }
-        let responder = ScriptedReplayResponder(script: script) { [weak self] status in
-            DispatchQueue.main.async {
-                guard let self, self.replayRunID == runID else { return }
-                self.replayRun = status
+        let options = activeReplayOptions
+        let responder = ReplayRunResponder(
+            makeResponder: { onStatus in
+                let script = options.pm5CurrentTime ? script.shiftingPM5Times(to: Date()) : script
+                switch options.matching {
+                    case .strict:
+                        return ScriptedReplayResponder(script: script, speed: options.speed, onStatus: onStatus)
+                    case .relaxed:
+                        return RelaxedReplayResponder(script: script, speed: options.speed, onStatus: onStatus)
+                }
+            },
+            onStatus: { [weak self] status in
+                DispatchQueue.main.async {
+                    guard let self, self.replayRunID == runID else { return }
+                    self.replayRun = status
+                }
             }
-        }
+        )
         scriptedReplayResponder = responder
         return responder
+    }
+
+    /// Changes how the loaded recording plays; a connected client's run
+    /// restarts with the new options. Persisted.
+    func setReplayOptions(_ options: ReplayOptions) {
+        guard options != replayOptions else { return }
+        replayOptions = options
+        options.save()
+        transport.performOnIOQueue { [self] in
+            activeReplayOptions = options
+            guard activeReplayScript != nil else { return }
+            replaceReplayResponder()
+        }
+    }
+
+    /// Starts playing the loaded recording: to the connected app right away,
+    /// and from the top for every app that connects afterwards. No-op without
+    /// a valid recording.
+    func startReplay() {
+        guard replayScript?.isValid == true else { return }
+        replayStarted = true
+        // The new run's ID reaches main only after the I/O queue built it; until
+        // then a status read (replay_start's own answer, a poll right after it)
+        // would still see the previous run's passed/failed. ID 0 is never a
+        // run's, so late statuses from the replaced responder are dropped too.
+        replayRunID = 0
+        replayRun = .waitingForClient
+        transport.performOnIOQueue { [self] in
+            replayStartedIO = true
+            replaceReplayResponder()
+        }
+    }
+
+    /// Stops answering the app; the recording stays loaded, ready to start.
+    func stopReplay() {
+        replayStarted = false
+        transport.performOnIOQueue { [self] in
+            replayStartedIO = false
+            replaceReplayResponder()
+        }
     }
 
     /// Restarts the loaded recording from its first entry for the connected
     /// client. No-op without a client or a valid recording.
     func restartReplay() {
         transport.performOnIOQueue { [self] in
-            scriptedReplayResponder?.start()
+            guard scriptedReplayResponder != nil else { return }
+            replaceReplayResponder()
         }
     }
 
@@ -427,7 +531,7 @@ public final class MockServer: ObservableObject {
         let remote = pm5Remote
         let engine = PM5RemoteEngine(
             sendToBridge: { [weak self] message in self?.passthroughBridge?.handleMessage(message) },
-            sendToApp: { transport.send($0) },
+            sendToApp: { [weak self] in self?.forwardToApp($0) },
             schedule: { delay, work in
                 DispatchQueue.global().asyncAfter(deadline: .now() + delay) {
                     transport.performOnIOQueue(work)
@@ -460,6 +564,10 @@ public final class MockServer: ObservableObject {
         guard let type = msg["type"] as? String else { return }
 
         if serveMode == .passthrough {
+            // Recorded as the app sent it, before the PM5 engine may hold it;
+            // the engine's own writes enter the bridge directly and never
+            // reach the recording.
+            passthroughBridge?.recordMessage(msg, direction: CBSWireDirectionFromClient)
             if pm5Engine.appMessage(msg) { return }
         }
         
@@ -468,6 +576,11 @@ public final class MockServer: ObservableObject {
                 passthroughBridge?.handleMessage(msg)
                 return
             case .replay:
+                switch type {
+                    case "scan": replayClientScan = msg
+                    case "stopScan": replayClientScan = nil
+                    default: break
+                }
                 replayEngine?.handleMessage(msg)
                 return
             case .mock:

@@ -4,6 +4,8 @@ import Foundation
 enum ReplayRunStatus: Equatable {
     /// No script loaded.
     case idle
+    /// A script is loaded but not started; the app is not answered.
+    case ready
     case waitingForClient
     case running(step: Int, total: Int, awaiting: String?)
     case passed(total: Int)
@@ -29,6 +31,7 @@ final class ScriptedReplayResponder: ReplayResponder {
     static let fromClientTimeout: TimeInterval = 60
 
     private let script: ReplayScript
+    private let speed: Double
     private let onStatus: (ReplayRunStatus) -> Void
     private let queue = DispatchQueue(label: "impossible.replay.player")
 
@@ -44,8 +47,10 @@ final class ScriptedReplayResponder: ReplayResponder {
     private var timer: DispatchSourceTimer?
 
     /// - Parameter onStatus: progress updates, called on a private queue.
-    init(script: ReplayScript, onStatus: @escaping (ReplayRunStatus) -> Void) {
+    /// - Parameter speed: divides every recorded delay; the wait for the app is not scaled.
+    init(script: ReplayScript, speed: Double = 1, onStatus: @escaping (ReplayRunStatus) -> Void) {
         self.script = script
+        self.speed = speed > 0 ? speed : 1
         self.onStatus = onStatus
         onStatus(.waitingForClient)
     }
@@ -54,16 +59,6 @@ final class ScriptedReplayResponder: ReplayResponder {
         queue.async { [self] in
             stopRun()
             self.send = send
-            startRun()
-        }
-    }
-
-    /// Restarts the run from the first entry for the current client session.
-    /// No-op without one.
-    func start() {
-        queue.async { [self] in
-            guard send != nil else { return }
-            stopRun()
             startRun()
         }
     }
@@ -105,7 +100,7 @@ final class ScriptedReplayResponder: ReplayResponder {
 
             if delayedIndex != index {
                 delayedIndex = index
-                let delay = script.delay(before: index)
+                let delay = script.delay(before: index) / speed
                 if delay > 0 {
                     publishProgress()
                     schedule(after: delay) { [weak self] in self?.run() }
