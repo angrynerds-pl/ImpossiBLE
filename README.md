@@ -214,7 +214,35 @@ The Android library (`Sources/ImpossiBLE-Android`) lets an app in the Android em
 
 **The bind address is fixed to `127.0.0.1` on purpose.** The token is the only authentication, and a relay reachable from the network would expose the Mac's Bluetooth (in Passthrough) to anything on the LAN. This may become configurable in the future, as an explicit opt-in.
 
-For a physical Android device, keep the relay on loopback and forward the port over USB: `adb reverse tcp:7700 tcp:7700`, then set the Android host to `127.0.0.1`.
+### Running an emulator, step by step
+
+```bash
+# 1. Start the Mac app, turn on the footer "Android relay" toggle, copy the token.
+
+# 2. Boot an emulator (list your AVDs first) and wait until it is ready.
+$ANDROID_HOME/emulator/emulator -list-avds
+$ANDROID_HOME/emulator/emulator -avd Pixel_8_API_35 &
+adb wait-for-device
+adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 1; done'
+
+# 3. Install and launch your app (token set via com.impossible.ble.TOKEN meta-data).
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n com.example.app/.MainActivity
+
+# 4. Check the connection: "transport Connected" means the relay accepted the token.
+adb logcat -s ImpossibleBle
+```
+
+No `adb reverse` is needed for an emulator, which reaches the Mac at `10.0.2.2`. If the log never reaches `Connected`, check that the provider is running (the relay closes silently without `/tmp/impossible.sock`) before regenerating the token.
+
+For a physical Android device, keep the relay on loopback and forward the port over USB, then set the Android host to `127.0.0.1`:
+
+```bash
+adb devices                          # the device must show as "device"
+adb reverse tcp:7700 tcp:7700        # use the port from the panel if you changed it
+adb reverse --list                   # verify
+adb reverse --remove tcp:7700        # when done
+```
 
 Never upload emulator APKs (store, test cloud, shared drive): the relay token is baked into them. Library tests: `cd Sources/ImpossiBLE-Android && ANDROID_HOME=$HOME/Library/Android/sdk ./gradlew test`. Consume it with `./gradlew publishToMavenLocal` and the `com.impossible:impossible-ble-android` coordinate.
 
