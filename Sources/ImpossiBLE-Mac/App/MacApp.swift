@@ -9,6 +9,7 @@ private final class MacAppRuntime {
     let server: MockServer
     let modeController: ModeTransitionController<ImpossiBLEMode>
     let control: ProviderControlServer
+    let relay: AndroidRelay
     let statusBar: StatusBarController
 
     init() {
@@ -40,10 +41,18 @@ private final class MacAppRuntime {
             }
         }
         control = ProviderControlServer(store: store, server: server, modeController: modeController)
-        statusBar = StatusBarController(store: store, server: server, modeController: modeController, control: control)
+        relay = AndroidRelay(server: server)
+        statusBar = StatusBarController(
+            store: store,
+            server: server,
+            modeController: modeController,
+            control: control,
+            relay: relay
+        )
 
         server.store = store
         control.start()
+        relay.start()
     }
 }
 
@@ -56,6 +65,7 @@ final class MacAppDelegate: NSObject, NSApplicationDelegate {
             return .terminateNow
         }
 
+        runtime.relay.stop()
         runtime.control.stop {
             runtime.server.stop {
                 sender.reply(toApplicationShouldTerminate: true)

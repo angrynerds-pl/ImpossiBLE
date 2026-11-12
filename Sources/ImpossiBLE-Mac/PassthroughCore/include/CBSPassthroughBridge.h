@@ -47,6 +47,12 @@ NS_ASSUME_NONNULL_BEGIN
 /// Closes the current recording file and records nothing further.
 - (void)stopRecording;
 
+/// When YES, a write without response waits for `canSendWriteWithoutResponse`
+/// and is acknowledged with `didWriteValue` (`writeType` 1). Off by default:
+/// CoreBluetooth never reports a completion for such a write, so a client
+/// that does not ask for it must not see one.
+@property (atomic, assign) BOOL reportsWriteWithoutResponseCompletion;
+
 /// Feed one decoded protocol message. Call from a single serial queue.
 - (void)handleMessage:(NSDictionary<NSString *, id> *)message;
 

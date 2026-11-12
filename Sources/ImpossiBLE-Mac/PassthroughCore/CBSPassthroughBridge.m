@@ -62,6 +62,9 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
 @property(nonatomic, strong) NSDictionary *pendingOptions;
 @property(nonatomic, strong) NSMutableSet<NSUUID *> *seenScanPeripherals;
 @property(nonatomic, assign) BOOL scanShouldDeduplicate;
+// Both guarded by cbQueue.
+@property(nonatomic, strong) NSMutableDictionary<NSString *, NSNumber *> *pendingReadCounts;
+@property(nonatomic, strong) NSMutableDictionary<NSUUID *, NSMutableArray<NSDictionary *> *> *queuedWritesWithoutResponse;
 // Atomic: replaced from the host's queue, read from the CB and out queues.
 @property(atomic, strong, nullable) CBSWireRecorder *recorder;
 @end
@@ -84,6 +87,8 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
         _pendingServiceFilters = [NSMutableDictionary dictionary];
         _seenScanPeripherals = [NSMutableSet set];
         _scanShouldDeduplicate = YES;
+        _pendingReadCounts = [NSMutableDictionary dictionary];
+        _queuedWritesWithoutResponse = [NSMutableDictionary dictionary];
     }
     return self;
 }
@@ -171,6 +176,8 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
     [self.recorder finish];
 
     dispatch_async(self.cbQueue, ^{
+        [self.pendingReadCounts removeAllObjects];
+        [self.queuedWritesWithoutResponse removeAllObjects];
         [self.central stopScan];
         for (CBPeripheral *peripheral in peripherals) {
             [self.central cancelPeripheralConnection:peripheral];
@@ -514,6 +521,7 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
                                 operation:@"Read"
                                    detail:chr.UUID.UUIDString ?: @""];
         dispatch_async(self.cbQueue, ^{
+            self.pendingReadCounts[chId] = @(self.pendingReadCounts[chId].integerValue + 1);
             [chr.service.peripheral readValueForCharacteristic:chr];
         });
         return;
@@ -559,7 +567,18 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
                                 operation:@"Write"
                                    detail:chr.UUID.UUIDString ?: @""];
         dispatch_async(self.cbQueue, ^{
-            [chr.service.peripheral writeValue:data forCharacteristic:chr type:wt];
+            CBPeripheral *target = chr.service.peripheral;
+            if (wt == CBCharacteristicWriteWithoutResponse && self.reportsWriteWithoutResponseCompletion) {
+                NSMutableArray *queue = self.queuedWritesWithoutResponse[target.identifier];
+                if (!queue) {
+                    queue = [NSMutableArray array];
+                    self.queuedWritesWithoutResponse[target.identifier] = queue;
+                }
+                [queue addObject:@{@"characteristic": chr, @"data": data}];
+                [self drainWritesWithoutResponseForPeripheral:target];
+                return;
+            }
+            [target writeValue:data forCharacteristic:chr type:wt];
         });
         return;
     }
@@ -982,7 +1001,12 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
     if (!peripheral.identifier) {
         return;
     }
-    [self sendMessage:@{@"type": @"didConnect", @"id": peripheral.identifier.UUIDString}];
+    [self sendMessage:@{
+        @"type": @"didConnect",
+        @"id": peripheral.identifier.UUIDString,
+        @"maxWriteWithResponse": @([peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithResponse]),
+        @"maxWriteWithoutResponse": @([peripheral maximumWriteValueLengthForType:CBCharacteristicWriteWithoutResponse])
+    }];
 }
 
 - (void)centralManager:(CBCentralManager *)central didFailToConnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
@@ -995,6 +1019,7 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
 
 - (void)centralManager:(CBCentralManager *)central didDisconnectPeripheral:(CBPeripheral *)peripheral error:(NSError *)error {
     [self cancelPendingL2capOpenForPeripheralId:peripheral.identifier];
+    [self clearTransientStateForPeripheral:peripheral];
     [self sendDisconnectForPeripheral:peripheral
                             timestamp:CFAbsoluteTimeGetCurrent()
                        isReconnecting:NO
@@ -1007,6 +1032,7 @@ static NSString *CBSStreamEventName(NSStreamEvent event) {
          isReconnecting:(BOOL)isReconnecting
                   error:(NSError *)error API_AVAILABLE(ios(17.0), macos(14.0)) {
     [self cancelPendingL2capOpenForPeripheralId:peripheral.identifier];
+    [self clearTransientStateForPeripheral:peripheral];
     [self sendDisconnectForPeripheral:peripheral
                             timestamp:timestamp
                        isReconnecting:isReconnecting
@@ -1178,12 +1204,18 @@ connectionEventDidOccur:(CBConnectionEvent)event
     }
     NSString *b64 = characteristic.value ? [characteristic.value base64EncodedStringWithOptions:0] : @"";
     NSString *errStr = error ? [error localizedDescription] : @"";
+    NSInteger pendingReads = self.pendingReadCounts[chId].integerValue;
+    BOOL isNotification = pendingReads <= 0;
+    if (!isNotification) {
+        self.pendingReadCounts[chId] = @(pendingReads - 1);
+    }
     [self sendMessage:@{
         @"type": @"didUpdateValue",
         @"id": peripheral.identifier.UUIDString,
         @"characteristicId": chId,
         @"value": b64,
-        @"error": errStr
+        @"error": errStr,
+        @"isNotification": @(isNotification)
     }];
 }
 
@@ -1325,10 +1357,45 @@ connectionEventDidOccur:(CBConnectionEvent)event
     }];
 }
 
+/// Drops writes still queued for a link that is gone, and read counters that
+/// would misclassify the next notification on a reconnected link. Runs on cbQueue.
+- (void)clearTransientStateForPeripheral:(CBPeripheral *)peripheral {
+    if (!peripheral.identifier) {
+        return;
+    }
+    [self.queuedWritesWithoutResponse removeObjectForKey:peripheral.identifier];
+    for (NSString *chId in [self.pendingReadCounts allKeys]) {
+        if ([self.characteristicsById[chId].service.peripheral.identifier isEqual:peripheral.identifier]) {
+            [self.pendingReadCounts removeObjectForKey:chId];
+        }
+    }
+}
+
+- (void)drainWritesWithoutResponseForPeripheral:(CBPeripheral *)peripheral {
+    NSMutableArray<NSDictionary *> *queue = self.queuedWritesWithoutResponse[peripheral.identifier];
+    while (queue.count > 0 && peripheral.canSendWriteWithoutResponse) {
+        NSDictionary *entry = queue.firstObject;
+        [queue removeObjectAtIndex:0];
+        CBCharacteristic *chr = entry[@"characteristic"];
+        [peripheral writeValue:entry[@"data"] forCharacteristic:chr type:CBCharacteristicWriteWithoutResponse];
+        NSString *chId = objc_getAssociatedObject(chr, kCBSCharacteristicIdKey);
+        if ([chId isKindOfClass:[NSString class]]) {
+            [self sendMessage:@{
+                @"type": @"didWriteValue",
+                @"id": peripheral.identifier.UUIDString,
+                @"characteristicId": chId,
+                @"writeType": @1,
+                @"error": @""
+            }];
+        }
+    }
+}
+
 - (void)peripheralIsReadyToSendWriteWithoutResponse:(CBPeripheral *)peripheral {
     if (!peripheral.identifier) {
         return;
     }
+    [self drainWritesWithoutResponseForPeripheral:peripheral];
     [self sendMessage:@{
         @"type": @"didReadyToWriteWithoutResponse",
         @"id": peripheral.identifier.UUIDString

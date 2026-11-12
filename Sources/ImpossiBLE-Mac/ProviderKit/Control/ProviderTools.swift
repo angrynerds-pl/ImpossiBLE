@@ -909,7 +909,9 @@ final class ProviderTools {
                 guard let client = tools.server.transport.connectedClient else {
                     throw ToolError("No simulator app is connected")
                 }
-                tools.server.terminateConnectedClient()
+                if let refusal = tools.server.terminateConnectedClient() {
+                    throw ToolError(refusal)
+                }
                 return ["terminated": ProviderTools.client(client)]
             }
         ),

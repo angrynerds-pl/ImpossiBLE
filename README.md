@@ -186,6 +186,76 @@ Capture results hide unnamed devices by default and sort likely useful devices f
 
 When you save a capture, ImpossiBLE performs a deeper inspection for selected connectable devices before writing the configuration. It connects to each device, discovers services, characteristics, and descriptors, and reads values where CoreBluetooth allows reads. Devices that are not connectable, fail to connect, or time out are still saved from their advertisement data. Secured characteristics may fail or trigger normal pairing/security behavior from macOS.
 
+## Android (Emulator)
+
+The Android library (`Sources/ImpossiBLE-Android`) lets an app in the Android emulator use the same provider. An emulator cannot reach a Unix socket on the Mac, so a small helper, `impossible-relay`, bridges TCP to it:
+
+```
+┌─────────────────┐  TCP 10.0.2.2:7700  ┌──────────────────┐  /tmp/impossible.sock  ┌───────────────────┐
+│ App in the      │ ──────────────────▶ │ impossible-relay │ ─────────────────────▶ │ ImpossiBLE-Mac    │
+│ Android emulator│ ◀────────────────── │ (127.0.0.1:7700) │ ◀───────────────────── │ Mock / Passthrough│
+└─────────────────┘                     └──────────────────┘                        └───────────────────┘
+```
+
+- **Opt-in.** The relay runs only while the footer **Android relay** toggle is on (default off). The helper is bundled at `ImpossiBLE-Mac.app/Contents/Helpers/impossible-relay`, is started and supervised by the menu bar app, and exits when the app does.
+- **Token.** The first line of every connection must be a `hello` carrying a random token (shown in the panel, with copy and regenerate buttons). Connections without it are closed silently. The relay strips the token and forwards the rest to `/tmp/impossible.sock`, so Mock, Passthrough and Replay work as for iOS. Like iOS, one client at a time: a newer connection replaces the older one.
+- **Loopback only.** The relay binds `127.0.0.1`. The emulator reaches it as `10.0.2.2`.
+
+### Configuration
+
+| Setting | Default | Where |
+| --- | --- | --- |
+| Relay port (Mac) | `7700` | Port field in the panel's relay row (1024-65535, Return applies and restarts the relay); persisted as `AndroidRelayPort` |
+| Relay address (Mac) | `127.0.0.1` | **Fixed.** See below |
+| Host (Android) | `10.0.2.2` | Manifest meta-data `com.impossible.ble.HOST` or `ImpossibleBle.configure(host = …)` |
+| Port (Android) | `7700` | `com.impossible.ble.PORT` or `configure(port = …)`; must match the Mac's |
+| Token (Android) | none | `com.impossible.ble.TOKEN` or `configure(token = …)` |
+| Request timeout | 15 s | `com.impossible.ble.REQUEST_TIMEOUT_MS` or `configure(requestTimeoutMs = …)` |
+
+**The bind address is fixed to `127.0.0.1` on purpose.** The token is the only authentication, and a relay reachable from the network would expose the Mac's Bluetooth (in Passthrough) to anything on the LAN. This may become configurable in the future, as an explicit opt-in.
+
+### Running an emulator, step by step
+
+```bash
+# 1. Start the Mac app, turn on the footer "Android relay" toggle, copy the token.
+
+# 2. Boot an emulator (list your AVDs first) and wait until it is ready.
+$ANDROID_HOME/emulator/emulator -list-avds
+$ANDROID_HOME/emulator/emulator -avd Pixel_8_API_35 &
+adb wait-for-device
+adb shell 'while [ "$(getprop sys.boot_completed)" != "1" ]; do sleep 1; done'
+
+# 3. Install and launch your app (token set via com.impossible.ble.TOKEN meta-data).
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb shell am start -n com.example.app/.MainActivity
+
+# 4. Check the connection: "transport Connected" means the relay accepted the token.
+adb logcat -s ImpossibleBle
+```
+
+`Sources/ImpossiBLE-Android/sample` is a minimal app (scan, tap a device to connect and list its services) that you can use instead of your own. It depends on the `shim` module directly, so no `publishToMavenLocal` is needed:
+
+```bash
+cd Sources/ImpossiBLE-Android
+./gradlew :sample:installDebug -PimpossibleToken=<token from the panel>
+adb shell am start -n com.impossible.sample/.MainActivity
+```
+
+The provider must be in Mock or Passthrough (not Off), or the relay closes the connection silently. The token is baked into the APK: never upload it. The sample has no devices of its own, so select a mock configuration in the panel to see something in the scan list.
+
+No `adb reverse` is needed for an emulator, which reaches the Mac at `10.0.2.2`. If the log never reaches `Connected`, check that the provider is running (the relay closes silently without `/tmp/impossible.sock`) before regenerating the token.
+
+For a physical Android device, keep the relay on loopback and forward the port over USB, then set the Android host to `127.0.0.1`:
+
+```bash
+adb devices                          # the device must show as "device"
+adb reverse tcp:7700 tcp:7700        # use the port from the panel if you changed it
+adb reverse --list                   # verify
+adb reverse --remove tcp:7700        # when done
+```
+
+Never upload emulator APKs (store, test cloud, shared drive): the relay token is baked into them. Library tests: `cd Sources/ImpossiBLE-Android && ANDROID_HOME=$HOME/Library/Android/sdk ./gradlew test`. Consume it with `./gradlew publishToMavenLocal` and the `com.impossible:impossible-ble-android` coordinate.
+
 ## Agent Control (MCP)
 
 AI agents such as Claude Code can drive ImpossiBLE through a local [MCP](https://modelcontextprotocol.io) server. Anything you can do in the menu bar panel, an agent can do too — plus a few things the panel cannot:

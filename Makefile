@@ -17,6 +17,10 @@ MAC_BIN_NAME = ImpossiBLE-Mac
 # targets pkill that path, which must not kill agents' running shims.
 MAC_MCP_NAME = impossible-mcp
 MAC_MCP = $(MAC_BUNDLE)/Contents/Helpers/$(MAC_MCP_NAME)
+# The Android relay lives next to it for the same reason; it also exits by itself
+# when its parent app is gone.
+MAC_RELAY_NAME = impossible-relay
+MAC_RELAY = $(MAC_BUNDLE)/Contents/Helpers/$(MAC_RELAY_NAME)
 MAC_FONT_RESOURCE = Sources/ImpossiBLE-Mac/ProviderKit/Resources/fa-brands-400.ttf
 INSTALLED_MAC_APP = $(INSTALL_DIR)/$(MAC_BUNDLE)
 MAC_DIST_ZIP = ImpossiBLE-Mac.zip
@@ -105,9 +109,11 @@ mac-relaunch:
 	@cp Sources/ImpossiBLE-Mac/.build/debug/$(MAC_BIN_NAME) $(MAC_BIN)
 	@mkdir -p $(MAC_BUNDLE)/Contents/Helpers
 	@cp Sources/ImpossiBLE-Mac/.build/debug/$(MAC_MCP_NAME) $(MAC_MCP)
+	@cp Sources/ImpossiBLE-Mac/.build/debug/$(MAC_RELAY_NAME) $(MAC_RELAY)
 	@cp $(MAC_ICON) $(MAC_BUNDLE)/Contents/Resources/ImpossiBLE.icns
 	@cp $(MAC_FONT_RESOURCE) $(MAC_BUNDLE)/Contents/Resources/
 	@codesign --force --sign - $(MAC_MCP) >/dev/null
+	@codesign --force --sign - $(MAC_RELAY) >/dev/null
 	@codesign --force --sign - --entitlements $(MAC_ENTITLEMENTS) $(MAC_BUNDLE) >/dev/null
 	@xattr -cr $(MAC_BUNDLE) 2>/dev/null || true
 	@pkill -f "$(MAC_BIN_NAME).app/Contents/MacOS" 2>/dev/null && sleep 0.5 || true
@@ -123,16 +129,19 @@ $(MAC_BIN): $(MAC_SRCS) $(MAC_PLIST) $(MAC_ENTITLEMENTS) $(MAC_ICON) $(MAC_FONT_
 	cp Sources/ImpossiBLE-Mac/.build/release/ImpossiBLE-Mac $(MAC_BIN)
 	mkdir -p $(MAC_BUNDLE)/Contents/Helpers
 	cp Sources/ImpossiBLE-Mac/.build/release/$(MAC_MCP_NAME) $(MAC_MCP)
+	cp Sources/ImpossiBLE-Mac/.build/release/$(MAC_RELAY_NAME) $(MAC_RELAY)
 	cp $(MAC_ICON) $(MAC_BUNDLE)/Contents/Resources/ImpossiBLE.icns
 	cp $(MAC_FONT_RESOURCE) $(MAC_BUNDLE)/Contents/Resources/
 	@if [ -z "$(MAC_SIGN_IDENTITY)" ]; then \
 		echo "WARNING: No codesigning identity matching '$(MAC_CODESIGN_MATCH)' found in your keychain."; \
 		echo "Signing the Mac app ad hoc. Gatekeeper will reject quarantined or distributed copies."; \
 		codesign --force --sign - $(MAC_MCP); \
+		codesign --force --sign - $(MAC_RELAY); \
 		codesign --force --sign - --entitlements $(MAC_ENTITLEMENTS) $(MAC_BUNDLE); \
 	else \
 		echo "Codesigning Mac app with: $(MAC_SIGN_IDENTITY)"; \
 		codesign --force --sign "$(MAC_SIGN_IDENTITY)" $(MAC_CODESIGN_FLAGS) $(MAC_MCP); \
+		codesign --force --sign "$(MAC_SIGN_IDENTITY)" $(MAC_CODESIGN_FLAGS) $(MAC_RELAY); \
 		codesign --force --sign "$(MAC_SIGN_IDENTITY)" $(MAC_CODESIGN_FLAGS) --entitlements $(MAC_ENTITLEMENTS) $(MAC_BUNDLE); \
 	fi
 	@xattr -cr $(MAC_BUNDLE) 2>/dev/null || true
