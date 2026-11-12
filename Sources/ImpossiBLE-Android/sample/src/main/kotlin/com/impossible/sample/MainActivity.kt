@@ -34,7 +34,9 @@ import no.nordicsemi.android.support.v18.scanner.ScanResult
  */
 class MainActivity : Activity() {
     private val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
-    private val devices = LinkedHashMap<String, BleDevice>()
+    private class Found(val device: BleDevice, val rssi: Int, val isPm: Boolean)
+
+    private val found = ArrayList<Found>()
     private val ui = Handler(Looper.getMainLooper())
     private val rows = ArrayList<Pair<String, String>>()
     private lateinit var adapter: ArrayAdapter<Pair<String, String>>
@@ -47,8 +49,13 @@ class MainActivity : Activity() {
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             runOnUiThread {
                 val device = result.device
-                if (devices.put(device.address, device) == null) {
-                    adapter.add((device.name ?: "(unnamed)") to "${device.address}   ${result.rssi} dBm")
+                if (found.none { it.device == device }) {
+                    val advertised = result.scanRecord?.serviceUuids.orEmpty()
+                    found += Found(device, result.rssi, isPm(device.name, advertised.map { it.toString() }))
+                    // PMs first, then by signal strength.
+                    found.sortWith(compareByDescending<Found> { it.isPm }.thenByDescending { it.rssi })
+                    adapter.clear()
+                    adapter.addAll(found.map { (it.device.name ?: "(unnamed)") to "${it.device.address}   ${it.rssi} dBm" + if (it.isPm) "   PM" else "" })
                 }
             }
         }
@@ -99,7 +106,7 @@ class MainActivity : Activity() {
         val list = ListView(this).apply {
             this.adapter = this@MainActivity.adapter
             emptyView = empty
-            setOnItemClickListener { _, _, position, _ -> connect(devices.values.elementAt(position)) }
+            setOnItemClickListener { _, _, position, _ -> connect(found[position].device) }
         }
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -126,7 +133,7 @@ class MainActivity : Activity() {
     }
 
     private fun startScan() {
-        devices.clear()
+        found.clear()
         adapter.clear()
         BluetoothLeScannerCompat.getScanner().startScan(callback)
     }
@@ -151,6 +158,10 @@ class MainActivity : Activity() {
     }
 
     private fun show(text: String) = runOnUiThread { deviceStatus.text = text }
+
+    /** A Concept2 PM: named "PM<n> …" or advertising a service of the Concept2 UUID base (CE06xxxx-43E5-11E4-916C-0800200C9A66). */
+    private fun isPm(name: String?, serviceUuids: List<String>) =
+        name?.matches(Regex("PM\\d.*")) == true || serviceUuids.any { it.startsWith("ce06", ignoreCase = true) }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
