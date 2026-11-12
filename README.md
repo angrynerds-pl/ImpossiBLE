@@ -233,6 +233,16 @@ adb shell am start -n com.example.app/.MainActivity
 adb logcat -s ImpossibleBle
 ```
 
+`Sources/ImpossiBLE-Android/sample` is a minimal app (scan, tap a device to connect and list its services) that you can use instead of your own. It depends on the `shim` module directly, so no `publishToMavenLocal` is needed:
+
+```bash
+cd Sources/ImpossiBLE-Android
+./gradlew :sample:installDebug -PimpossibleToken=<token from the panel>
+adb shell am start -n com.impossible.sample/.MainActivity
+```
+
+The provider must be in Mock or Passthrough (not Off), or the relay closes the connection silently. The token is baked into the APK: never upload it. The sample has no devices of its own, so select a mock configuration in the panel to see something in the scan list.
+
 No `adb reverse` is needed for an emulator, which reaches the Mac at `10.0.2.2`. If the log never reaches `Connected`, check that the provider is running (the relay closes silently without `/tmp/impossible.sock`) before regenerating the token.
 
 For a physical Android device, keep the relay on loopback and forward the port over USB, then set the Android host to `127.0.0.1`:
