@@ -45,7 +45,8 @@ public final class AndroidRelay: ObservableObject {
 
     public static let enabledKey = "AndroidRelayEnabled"
     public static let tokenKey = "AndroidRelayToken"
-    static let port = 7700
+    public static let portKey = "AndroidRelayPort"
+    public static let defaultPort = 7700
     private static let exitUsage: Int32 = 64
     private static let exitPortInUse: Int32 = 75
     /// A just-stopped helper may still hold the port for a moment.
@@ -55,6 +56,8 @@ public final class AndroidRelay: ObservableObject {
     @Published public private(set) var status: Status = .off
     @Published public private(set) var isEnabled: Bool
     @Published public private(set) var token: String
+    /// The helper always binds 127.0.0.1; only the port is configurable.
+    @Published public private(set) var port: Int
 
     /// The helper's pid while it runs.
     public var pid: pid_t? { process.map(\.processIdentifier) }
@@ -72,7 +75,11 @@ public final class AndroidRelay: ObservableObject {
         self.helperURL = helperURL
         isEnabled = defaults.bool(forKey: Self.enabledKey)
         token = defaults.string(forKey: Self.tokenKey) ?? ""
+        let stored = defaults.integer(forKey: Self.portKey)
+        port = Self.isValid(port: stored) ? stored : Self.defaultPort
     }
+
+    static func isValid(port: Int) -> Bool { (1024...65535).contains(port) }
 
     /// Next to the app's executable under Contents/Helpers, or beside the
     /// binary in an SPM build folder.
@@ -101,7 +108,7 @@ public final class AndroidRelay: ObservableObject {
         }
         let helper = Process()
         helper.executableURL = helperURL
-        helper.environment = ["IMPOSSIBLE_RELAY_TOKEN": token, "IMPOSSIBLE_RELAY_PORT": String(Self.port)]
+        helper.environment = ["IMPOSSIBLE_RELAY_TOKEN": token, "IMPOSSIBLE_RELAY_PORT": String(port)]
         let output = Pipe()
         helper.standardOutput = output
         output.fileHandleForReading.readabilityHandler = { [weak self, weak helper] handle in
@@ -164,6 +171,21 @@ public final class AndroidRelay: ObservableObject {
         if shouldRun { start() }
     }
 
+    /// Persists a new port. A running or failed-but-enabled helper is restarted on it.
+    /// Returns false, changing nothing, for a port outside 1024...65535.
+    @discardableResult
+    public func setPort(_ newPort: Int) -> Bool {
+        guard Self.isValid(port: newPort) else { return false }
+        guard newPort != port else { return true }
+        let shouldRun = isEnabled && (process != nil || status.isFailedOrBlocked)
+        stop()
+        port = newPort
+        defaults.set(newPort, forKey: Self.portKey)
+        restartBudget.reset()
+        if shouldRun { start() }
+        return true
+    }
+
     public func setEnabled(_ enabled: Bool) {
         guard enabled != isEnabled else { return }
         isEnabled = enabled
@@ -191,7 +213,7 @@ public final class AndroidRelay: ObservableObject {
                     return
                 }
                 portRetries = 0
-                status = .blocked("port \(Self.port) is in use")
+                status = .blocked("port \(port) is in use")
             case Self.exitUsage where reason == .exit:
                 status = .failed("impossible-relay rejected its configuration")
             default:

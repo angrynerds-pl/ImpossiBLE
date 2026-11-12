@@ -24,4 +24,21 @@ final class AndroidRelayLifecycleTests: XCTestCase {
         XCTAssertNotNil(relay.pid, "A failed but enabled relay is started again with the new token")
         relay.stop()
     }
+
+    func testPortIsValidatedPersistedAndReachesTheHelper() throws {
+        let out = FileManager.default.temporaryDirectory.appendingPathComponent("port-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: out) }
+        let relay = try makeRelay(script: "echo $IMPOSSIBLE_RELAY_PORT > \(out.path); sleep 5")
+        XCTAssertEqual(relay.port, AndroidRelay.defaultPort)
+        XCTAssertFalse(relay.setPort(80), "Privileged ports are rejected")
+        XCTAssertFalse(relay.setPort(70000))
+        XCTAssertEqual(relay.port, AndroidRelay.defaultPort)
+
+        XCTAssertTrue(relay.setPort(7811))
+        relay.setEnabled(true)
+        let deadline = Date().addingTimeInterval(5)
+        while !FileManager.default.fileExists(atPath: out.path) && Date() < deadline { usleep(50_000) }
+        XCTAssertEqual(try String(contentsOf: out).trimmingCharacters(in: .whitespacesAndNewlines), "7811")
+        relay.stop()
+    }
 }

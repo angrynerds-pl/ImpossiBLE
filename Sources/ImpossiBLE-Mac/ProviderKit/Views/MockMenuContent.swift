@@ -226,7 +226,7 @@ private struct AndroidRelayToggle: View {
     var body: some View {
         IconToggle(
             systemImage: "iphone.gen3.radiowaves.left.and.right",
-            help: "Let the Android emulator reach ImpossiBLE through a loopback relay on port 7700",
+            help: "Let the Android emulator reach ImpossiBLE through a loopback relay (port configurable in the relay row)",
             isOn: Binding(
                 get: { relay.isEnabled },
                 set: { newValue in
@@ -242,6 +242,7 @@ private struct AndroidRelayToggle: View {
 private struct AndroidRelayRow: View {
     @ObservedObject var relay: AndroidRelay
     @ObservedObject var transport: ProtocolServer
+    @State private var portText = ""
 
     var body: some View {
         HStack(spacing: 8) {
@@ -266,6 +267,13 @@ private struct AndroidRelayRow: View {
                 }
             }
             Spacer(minLength: 0)
+            TextField("Port", text: $portText)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption2.monospaced())
+                .frame(width: 52)
+                .onSubmit(commitPort)
+                .help("Relay port on 127.0.0.1 (1024-65535); Return to apply and restart the relay")
+                .accessibilityLabel("Relay port")
             Button {
                 relay.regenerateToken()
             } label: {
@@ -295,6 +303,11 @@ private struct AndroidRelayRow: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
+        .onAppear { portText = String(relay.port) }
+    }
+
+    private func commitPort() {
+        if !relay.setPort(Int(portText) ?? 0) { portText = String(relay.port) }
     }
 
     private var clientConnected: Bool {
@@ -306,7 +319,7 @@ private struct AndroidRelayRow: View {
         switch relay.status {
             case .off: "Off"
             case .starting: "Starting"
-            case .listening: clientConnected ? "Client connected" : "Listening on 127.0.0.1:7700"
+            case .listening: clientConnected ? "Client connected" : "Listening on 127.0.0.1:\(relay.port)"
             case .blocked(let reason): "Blocked: \(reason)"
             case .failed(let reason): "Failed: \(reason)"
         }
